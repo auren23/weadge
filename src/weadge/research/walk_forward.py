@@ -9,12 +9,27 @@ Rules:
 
 from __future__ import annotations
 
+import calendar
 from collections.abc import Iterator
 from datetime import datetime
 
 import polars as pl
 
 from weadge.domain.time import ensure_utc
+
+
+def _add_months_clamped(dt: datetime, months: int) -> datetime:
+    """dt + months, clamping the day to the target month's length.
+
+    Plain replace() raises on e.g. Jan 31 -> Feb 31; real event dates
+    (a month can end on the 31st) must not crash the walk-forward split.
+    """
+    y, m = dt.year, dt.month + months
+    while m > 12:
+        m -= 12
+        y += 1
+    day = min(dt.day, calendar.monthrange(y, m)[1])
+    return dt.replace(year=y, month=m, day=day)
 
 
 def walk_forward_splits(
@@ -34,21 +49,14 @@ def walk_forward_splits(
     Dates must be sorted. No shuffling, no overlap between windows.
     """
 
-    def add_months(dt: datetime, months: int) -> datetime:
-        y, m = dt.year, dt.month + months
-        while m > 12:
-            m -= 12
-            y += 1
-        return dt.replace(year=y, month=m)
-
     dates = sorted(ensure_utc(d) for d in dates)
     if not dates:
         return
     first = dates[0]
-    test_start = add_months(first, train_months)
+    test_start = _add_months_clamped(first, train_months)
     while test_start <= dates[-1]:
         yield first, test_start
-        test_start = add_months(test_start, test_months)
+        test_start = _add_months_clamped(test_start, test_months)
 
 
 def split_frame(
@@ -63,12 +71,8 @@ def split_frame(
     train = df.filter(
         (pl.col(time_col) >= train_start) & (pl.col(time_col) < test_start)
     )
-    # test window: next month after test_start
-    y, m = test_start.year, test_start.month + 1
-    while m > 12:
-        m -= 12
-        y += 1
-    test_end = test_start.replace(year=y, month=m)
+    # test window: next month after test_start (day clamped to month length)
+    test_end = _add_months_clamped(test_start, 1)
     test = df.filter((pl.col(time_col) >= test_start) & (pl.col(time_col) < test_end))
     return train, test
 

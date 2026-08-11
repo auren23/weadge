@@ -91,3 +91,35 @@ class TestCityHoldout:
         assert test["city"].to_list() == ["NY", "NY"]
         assert set(train["city"].to_list()) == {"CHI", "MIA"}
         assert train.height + test.height == df.height
+
+
+class TestMonthEndSafety:
+    """Regression: a cut point on Jan 31 must not crash on 'Feb 31'."""
+
+    def test_split_frame_clamps_test_end(self) -> None:
+        df = pl.DataFrame(
+            {
+                "event_date": [
+                    datetime(2026, 1, 31, tzinfo=UTC),  # test (window start)
+                    datetime(2026, 2, 15, tzinfo=UTC),  # test
+                ]
+            }
+        )
+        train, test = split_frame(
+            df,
+            datetime(2026, 1, 31, tzinfo=UTC),
+            datetime(2026, 1, 31, tzinfo=UTC),
+        )
+        assert train.height == 0
+        assert test.height == 2  # half-open window Jan 31 -> Feb 28 (clamped)
+
+    def test_walk_forward_splits_clamps_month_end(self) -> None:
+        dates = [
+            datetime(2026, 1, 31, tzinfo=UTC),
+            datetime(2026, 3, 1, tzinfo=UTC),
+        ]
+        cuts = list(walk_forward_splits(dates, train_months=1, test_months=1))
+        assert cuts[0] == (
+            datetime(2026, 1, 31, tzinfo=UTC),
+            datetime(2026, 2, 28, tzinfo=UTC),  # not Feb 31
+        )

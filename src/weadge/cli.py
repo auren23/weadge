@@ -215,27 +215,36 @@ def research_calibration(series: _series_opt) -> None:
 
 @research_app.command("incremental")
 def research_incremental(series: _series_opt) -> None:
-    """Alpha existence test: does weather add to market OOS (M0/M1/M2)?"""
-    from weadge.research.edge import fit_incremental
+    """Alpha existence test: does weather add OOS info given the market?
+
+    Walk-forward, paired samples, event/date clustered bootstrap:
+    gate = mean OOS delta_ll (M0 vs M2) > 0 AND 95% cluster CI > 0.
+    """
+    from weadge.research.edge import paired_incremental_gate
     from weadge.research.walk_forward import split_frame
 
     df = _load_gold(series)
     dates = sorted(df["event_date"].unique().to_list())
-    windows: list[list] = []
+    wins = total = 0
     for i in range(len(dates) - 3):
         train_start, test_start = dates[i], dates[i + 3]
         train, test = split_frame(df, train_start, test_start)
         if test.is_empty():
             continue
-        windows.append(fit_incremental(train, test))
-
-    def _ll(results: list) -> float:
-        return next(r.test_log_loss for r in results if r.model == "M2")
-
-    m0_win = sum(1 for w in windows if _ll(w) < next(r.test_log_loss for r in w if r.model == "M0"))
-    for r in windows[-1]:
-        console.print(r)
-    console.print(f"M2 beats M0 on OOS log loss in {m0_win}/{len(windows)} windows")
+        g = paired_incremental_gate(train, test)
+        total += 1
+        wins += int(g.has_incremental_alpha)
+        flag = "ALPHA" if g.has_incremental_alpha else "none"
+        console.print(
+            f"{test_start.date()} delta_ll={g.delta_ll:+.4f} "
+            f"95% CI=[{g.ci_lower:+.4f}, {g.ci_upper:+.4f}] "
+            f"gamma={g.gamma if g.gamma is None else f'{g.gamma:+.3f}'} "
+            f"n={g.test_n} clusters={g.n_clusters} -> {flag}"
+        )
+    console.print(
+        f"incremental alpha in {wins}/{total} windows "
+        f"(mean delta_ll > 0 & 95% cluster CI lower bound > 0)"
+    )
 
 
 @research_app.command("latency")
@@ -254,7 +263,11 @@ def research_latency(series: _series_opt) -> None:
 
 @research_app.command("walk-forward")
 def research_walk_forward(series: _series_opt) -> None:
-    """Chronological walk-forward: log loss of M0 vs M2 per expanding window."""
+    """Chronological walk-forward: log loss of M0 vs M2 per expanding window.
+
+    All models are scored on the same (paired) rows; the significance gate
+    lives in `research incremental` (clustered bootstrap).
+    """
     from weadge.research.edge import fit_incremental
     from weadge.research.walk_forward import split_frame
 
@@ -266,7 +279,10 @@ def research_walk_forward(series: _series_opt) -> None:
         if test.is_empty():
             continue
         for r in fit_incremental(train, test):
-            console.print(f"{test_start.date()} M{r.model[1]}: ll={r.test_log_loss:.4f} brier={r.test_brier:.4f}")
+            console.print(
+                f"{test_start.date()} M{r.model[1]}: ll={r.test_log_loss:.4f} "
+                f"brier={r.test_brier:.4f} n={r.test_n}"
+            )
 
 
 # ---------------------------------------------------------------- backtest
