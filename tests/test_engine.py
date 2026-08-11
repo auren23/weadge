@@ -150,6 +150,109 @@ class TestCompletedBarGate:
         assert report.trades_table["execute_at"][0] == T0 + timedelta(minutes=6)
 
 
+class TestEdgeBins:
+    """Predicted-edge binning must be exact: no digitize off-by-one, no
+    dropped top tail, every trade in exactly one explicit interval."""
+
+    def _flat_quotes(self) -> pl.DataFrame:
+        """Constant ask 0.50 / bid 0.45 across 60 bars -> gross = p_model - 0.50."""
+        rows = []
+        for i in range(60):
+            start = T0 + timedelta(minutes=i)
+            rows.append(
+                {
+                    "market_ticker": "MKT1",
+                    "ts": start,
+                    "bar_start_at": start,
+                    "bar_end_at": start + timedelta(minutes=1),
+                    "yes_bid_open": 0.45,
+                    "yes_bid_high": 0.45,
+                    "yes_bid_low": 0.45,
+                    "yes_bid_close": 0.45,
+                    "yes_ask_open": 0.50,
+                    "yes_ask_high": 0.50,
+                    "yes_ask_low": 0.50,
+                    "yes_ask_close": 0.50,
+                    "volume": 100,
+                    "open_interest": 500,
+                    "ingested_at": start + timedelta(minutes=1),
+                }
+            )
+        return pl.DataFrame(rows)
+
+    def _run(self, signals: pl.DataFrame) -> pl.DataFrame:
+        report = run_taker_backtest(
+            signals, self._flat_quotes(), _fee_schedule(), threshold=0.0
+        )
+        return report.edge_bins
+
+    def test_all_trades_land_in_exactly_one_bin(self) -> None:
+        # gate ask ~0.50 -> gross = p_model - ~0.50 across every bin
+        signals = pl.DataFrame(
+            {
+                "market_ticker": ["MKT1"] * 7,
+                "decision_at": [T0 + timedelta(minutes=5 + i) for i in range(7)],
+                "p_model": [0.51, 0.53, 0.55, 0.57, 0.59, 0.61, 0.71],
+                "result": [0, 0, 0, 1, 1, 1, 1],
+            }
+        )
+        bins = self._run(signals)
+        assert bins["edge_bin"].to_list() == ["<2%", "2-4%", "4-6%", "6-8%", "8-10%", "10%+"]
+        assert bins["n"].to_list() == [1, 1, 1, 1, 1, 2]
+        assert int(bins["n"].sum()) == 7  # no trade dropped, none double-counted
+
+    def test_top_tail_not_dropped(self) -> None:
+        """Regression: the old digitize mapping silently dropped every trade
+        with gross >= 12% (the '12%+' label had no bin index)."""
+        signals = pl.DataFrame(
+            {
+                "market_ticker": ["MKT1"] * 2,
+                "decision_at": [T0 + timedelta(minutes=5), T0 + timedelta(minutes=6)],
+                "p_model": [0.65, 0.99],  # gross ~0.15 and ~0.49
+                "result": [1, 1],
+            }
+        )
+        bins = self._run(signals)
+        top = bins.filter(pl.col("edge_bin") == "10%+")
+        assert len(top) == 1
+        assert top["n"][0] == 2  # both high-edge trades present
+
+    def test_realized_edge_is_monotone_in_predicted_edge(self) -> None:
+        """The monotonicity evidence this table exists for: bins with higher
+        predicted edge must show higher realized edge (wins sit in the top)."""
+        signals = pl.DataFrame(
+            {
+                "market_ticker": ["MKT1"] * 6,
+                "decision_at": [T0 + timedelta(minutes=5 + i) for i in range(6)],
+                "p_model": [0.51, 0.55, 0.57, 0.59, 0.61, 0.71],
+                "result": [0, 0, 1, 1, 1, 1],
+            }
+        )
+        bins = self._run(signals)
+        order = ["<2%", "2-4%", "4-6%", "6-8%", "8-10%", "10%+"]
+        realized = []
+        for label in order:
+            rows = bins.filter(pl.col("edge_bin") == label)
+            if len(rows):
+                realized.append(rows["realized_edge"][0])
+        assert realized == sorted(realized)  # non-decreasing across bins
+
+    def test_below_threshold_trades_absent(self) -> None:
+        signals = pl.DataFrame(
+            {
+                "market_ticker": ["MKT1"] * 2,
+                "decision_at": [T0 + timedelta(minutes=5), T0 + timedelta(minutes=6)],
+                "p_model": [0.55, 0.61],  # gross 0.05 and 0.11
+                "result": [1, 1],
+            }
+        )
+        report = run_taker_backtest(
+            signals, self._flat_quotes(), _fee_schedule(), threshold=0.06
+        )
+        assert report.trades == 1
+        assert report.edge_bins["edge_bin"].to_list() == ["10%+"]
+
+
 class TestFeeIntegration:
     def test_fee_uses_kalshi_formula_at_execution_time(self) -> None:
         quotes = make_quotes("MKT1", T0, 30, bid_base=0.40, ask_base=0.45)

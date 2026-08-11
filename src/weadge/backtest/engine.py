@@ -223,21 +223,43 @@ def _ask_at_completed_bar(
     return float(before.tail(1)[ask_col][0])
 
 
+# Predicted-edge bins: explicit half-open intervals [low, high).
+# Never map np.digitize indices to labels by hand — an off-by-one there
+# silently relabels every bin and drops the top one, which would corrupt
+# the edge -> realized-EV monotonicity evidence this table exists for.
+_EDGE_INTERVALS: list[tuple[str, float | None, float | None]] = [
+    ("<2%", None, 0.02),
+    ("2-4%", 0.02, 0.04),
+    ("4-6%", 0.04, 0.06),
+    ("6-8%", 0.06, 0.08),
+    ("8-10%", 0.08, 0.10),
+    ("10%+", 0.10, None),
+]
+
+
 def _edge_bins(trades: pl.DataFrame) -> pl.DataFrame:
-    """Predicted-edge bin -> realized edge (monotonicity check)."""
-    edges = [0.06, 0.08, 0.10, 0.12, np.inf]
-    labels = ["6-8%", "8-10%", "10-12%", "12%+"]
-    bins = np.digitize(trades["gross_edge"].to_numpy(), edges[:-1], right=False)
+    """Predicted-edge bin -> realized edge (monotonicity check).
+
+    Every trade lands in exactly one interval, including the top tail:
+    gross edge >= 10% (12%, 20%, ...) is its own bin, never dropped.
+    """
+    gross = trades["gross_edge"].to_numpy()
+    pnl = trades["pnl"].to_numpy()
     rows = []
-    for i, label in enumerate(labels):
-        mask = bins == i
-        if not mask.any():
+    for label, lo, hi in _EDGE_INTERVALS:
+        mask = np.ones(len(gross), dtype=bool)
+        if lo is not None:
+            mask &= gross >= lo
+        if hi is not None:
+            mask &= gross < hi
+        n = int(mask.sum())
+        if n == 0:
             continue
         rows.append(
             {
                 "edge_bin": label,
-                "n": int(mask.sum()),
-                "realized_edge": float(trades["pnl"].to_numpy()[mask].mean()),
+                "n": n,
+                "realized_edge": float(pnl[mask].mean()),
             }
         )
     return pl.DataFrame(rows)
