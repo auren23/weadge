@@ -144,7 +144,7 @@ class IEMClient:
 
     def _get(self, url: str) -> httpx.Response:
         last: Exception | None = None
-        for attempt in range(self.max_retries + 1):
+        for _attempt in range(self.max_retries + 1):
             try:
                 resp = self._client.get(url)
                 if resp.status_code >= 500:
