@@ -50,7 +50,13 @@ class DataLake:
         layer: str = "bronze",
         partition_by: str | None = None,
     ) -> Path:
-        """Write a canonical frame, partitioned by a column (dropped into dirs)."""
+        """Write a canonical frame, partitioned by a column into hive-style
+        directories: <layer>/<table>/<partition_by>=<value>/part-NNNNN.parquet.
+
+        The partition column is KEPT in the files (read() concatenates
+        individual files and re-adds nothing), and re-runs append new part
+        files without touching existing ones.
+        """
         if layer not in ("bronze", "silver", "gold"):
             raise ValueError(f"unknown layer {layer}")
         df = canon.cast_to_schema(df, table)
@@ -61,8 +67,11 @@ class DataLake:
             if partition_by not in df.columns:
                 raise ValueError(f"partition column {partition_by} not in frame")
             df = df.sort(partition_by)
-            out = out_dir / f"{partition_by}=*"
-            df.write_parquet(out, compression="zstd")
+            for (value,), grp in df.group_by(partition_by, maintain_order=True):
+                part_dir = out_dir / f"{partition_by}={value}"
+                part_dir.mkdir(parents=True, exist_ok=True)
+                n = len(list(part_dir.glob("part-*.parquet")))
+                grp.write_parquet(part_dir / f"part-{n:05d}.parquet", compression="zstd")
             return out_dir
         path = out_dir / f"part-{len(list(out_dir.glob('*.parquet'))):05d}.parquet"
         df.write_parquet(path, compression="zstd")
@@ -70,11 +79,10 @@ class DataLake:
 
     def read(self, table: str, layer: str = "bronze") -> pl.DataFrame:
         """Read all partitions of a table as one frame."""
-        pattern = self.root / layer / table / "*.parquet"
-        files = sorted(pattern.glob("*")) if pattern.parent.exists() else []
-        if not files:
-            # also handle partitioned dirs (a/b=*/part-*.parquet)
-            files = sorted((pattern.parent).glob("*/*.parquet"))
+        root = self.root / layer / table
+        if not root.exists():
+            return canon.empty_frame(table)
+        files = sorted(root.glob("*.parquet")) + sorted(root.glob("*/*.parquet"))
         if not files:
             return canon.empty_frame(table)
         return pl.concat([pl.read_parquet(f) for f in files], how="vertical_relaxed")
