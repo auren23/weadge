@@ -32,12 +32,14 @@ def _events() -> pl.DataFrame:
 
 
 def _markets() -> pl.DataFrame:
+    # Realistic Kalshi ladder: B-buckets closed [floor, cap], T-buckets
+    # strict; the integer sets {<=87},{88,89},{90,91},{>=92} tile.
     rows = []
     for ticker, lo, hi, result in [
-        (f"{EVENT}-M1", None, 88.0, "no"),  # unbounded lower tail
-        (f"{EVENT}-M2", 88.0, 90.0, "no"),
-        (f"{EVENT}-M3", 90.0, 92.0, "yes"),
-        (f"{EVENT}-M4", 92.0, None, "no"),  # unbounded upper tail
+        (f"{EVENT}-M1", None, 88.0, "no"),  # T88: less than 88
+        (f"{EVENT}-M2", 88.0, 89.0, "no"),  # B88.5: between 88-89
+        (f"{EVENT}-M3", 90.0, 91.0, "yes"),  # B90.5: between 90-91
+        (f"{EVENT}-M4", 91.0, None, "no"),  # T91: greater than 91
     ]:
         rows.append(
             {
@@ -198,7 +200,9 @@ class TestAlphaDataset:
         )
         from scipy import stats as _stats
 
-        expected = _stats.norm.cdf(92.0, 88.0, 2.0) - _stats.norm.cdf(90.0, 88.0, 2.0)
+        # M3 = [90, 91] over reported whole degrees; the continuous forecast
+        # is rounded the same way the DCR reports: [89.5, 91.5)
+        expected = _stats.norm.cdf(91.5, 88.0, 2.0) - _stats.norm.cdf(89.5, 88.0, 2.0)
         assert row["p_nbm"] == pytest.approx(expected, abs=1e-9)
 
     def test_fee_from_schedule_at_decision_time(self, builder) -> None:

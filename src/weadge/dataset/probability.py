@@ -24,6 +24,35 @@ from weadge.domain.probability import (
 )
 
 
+def _reported_bounds(
+    bucket_low: float | None, bucket_high: float | None
+) -> tuple[float | None, float | None]:
+    """Continuous forecast -> probability of the DCR's WHOLE-DEGREE report.
+
+    Kalshi temperature buckets settle on the NWS daily report, which is
+    rounded to whole degrees (T79 = "less than 79°" -> reported <= 78;
+    B79.5 = "between 79-80°" -> reported 79 or 80; T86 = "greater than
+    86°" -> reported >= 87). Rounding a continuous distribution the same
+    way shifts every strike boundary by half a degree, TOWARDS the bucket
+    for closed B-buckets and AWAY for strict T-buckets:
+
+        B [floor, cap]   -> [floor-0.5, cap+0.5)
+        T "less than c"  -> (-inf, c-0.5)
+        T "greater than f" -> [f+0.5, +inf)
+
+    This makes the bucket probabilities tile the real line (sum to 1) on
+    the 1-degree-wide ladders Kalshi actually runs (e.g. {<=78}, {79,80},
+    {81,82}, ..., {>=87}); without it the mass between buckets belongs to
+    no market and every partition sums to <1, silently handicapping the
+    model in the comparison.
+    """
+    if bucket_low is None:  # T lower: strictly less than the cap
+        return None, bucket_high - 0.5
+    if bucket_high is None:  # T upper: strictly greater than the floor
+        return bucket_low + 0.5, None
+    return bucket_low - 0.5, bucket_high + 0.5
+
+
 def market_probability_from_quote(quote: pl.DataFrame | None) -> float | None:
     """Mid close of the quote snapshot -> probability (exact, no cent clamp)."""
     if quote is None or quote.is_empty():
@@ -57,7 +86,8 @@ def kalshi_forecast_probability(
     }
     if len(pairs) < 2:
         return None
-    return bucket_probability_from_percentiles(pairs, bucket_low, bucket_high)
+    low, high = _reported_bounds(bucket_low, bucket_high)
+    return bucket_probability_from_percentiles(pairs, low, high)
 
 
 def nbm_bucket_probability(
@@ -91,12 +121,16 @@ def nbm_bucket_probability(
     if row.is_empty():
         return None
     r = row.row(0, named=True)
+    low, high = _reported_bounds(bucket_low, bucket_high)
     if r.get("mean") is not None and r.get("std") is not None:
-        return bucket_probability_from_normal(r["mean"], r["std"], bucket_low, bucket_high)
-    pcts = {p: r.get(col) for p, col in [(10, "p10"), (25, "p25"), (50, "p50"), (75, "p75"), (90, "p90")]}
+        return bucket_probability_from_normal(r["mean"], r["std"], low, high)
+    pcts = {
+        p: r.get(col)
+        for p, col in [(10, "p10"), (25, "p25"), (50, "p50"), (75, "p75"), (90, "p90")]
+    }
     pcts = {p: v for p, v in pcts.items() if v is not None}
     if len(pcts) >= 2:
-        return bucket_probability_from_percentiles(pcts, bucket_low, bucket_high)
+        return bucket_probability_from_percentiles(pcts, low, high)
     return None
 
 
