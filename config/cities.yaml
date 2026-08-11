@@ -1,0 +1,18 @@
+# City / station configuration.
+# One series per city. v0 only covers KXHIGHNY — add cities only after
+# the whole pipeline (settlement → alpha) passes for NY.
+
+cities:
+  - series_ticker: KXHIGHNY
+    city: "New York"
+    location: "Central Park"
+    station_id: "KNYC"            # NWS ASOS site for Central Park
+    lat: 40.7790
+    lon: -73.9692
+    timezone: "America/New_York"
+    target: "max_temperature"     # daily maximum temperature
+    unit: "fahrenheit"
+    settlement:
+      day_window: "target_date"
+      rounding: 0.5               # Kalshi buckets are 1F; strikes centered on integers
+      source: "NWS ASOS"          # official settlement source (from series metadata)

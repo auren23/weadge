@@ -1,0 +1,64 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+*.egg
+
+# ---- Virtualenv / tooling ----
+.venv/
+venv/
+.uv/
+.mypy_cache/
+.pyright/
+.ruff_cache/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# ---- Data lake (never commit raw/bronze data) ----
+data/
+*.parquet
+*.duckdb
+*.zst
+*.zstd
+*.jsonl
+
+# ---- Weather model files (GRIB etc.) ----
+*.grb
+*.grib2
+*.idx
+*.nc
+
+# ---- Secrets ----
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*credentials*
+
+# ---- Notebooks: keep code, drop outputs/checkpoints ----
+.ipynb_checkpoints/
+*_files/
+!.gitkeep
+
+# ---- Editors / OS ----
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ---- Docs / scratch ----
+scratch/
+tmp/
+*.log
+
+# Data lake directories are created at runtime by the storage layer.
+# (data/ itself stays ignored; weadge re-creates raw/bronze/silver/gold on init.)

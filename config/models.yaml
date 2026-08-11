@@ -1,0 +1,31 @@
+# Weather model registry.
+# `available_at` for a model run is a conservative offset added to run_init_at:
+# weadge may only use a forecast at decision times where
+#   run_init_at + availability_offset <= decision_at
+# Never assume run_init_at alone is knowable.
+
+models:
+  - id: kalshi_forecast
+    description: >
+      Kalshi event forecast percentile history. Provenance of the underlying
+      weather model is NOT documented by Kalshi — do not label it p_nbm.
+      Source: GET /events/{event_ticker}/forecast_percentile_history
+    availability_offset_min: 0      # timestamps already reflect "end period" of each bucket
+
+  - id: nbm
+    description: "NOAA National Blend of Models, v5.x probabilistic products (MaxT mean/std/p10..p90)"
+    availability_offset_min: 15     # conservative: model file publication lag
+    grid: "NBM CONUS"
+
+  - id: gefs
+    description: "NOAA GEFS ensemble (31 members) — v1+, challenger to NBM"
+    availability_offset_min: 120
+    grid: "GEFS 0.25deg"
+
+  - id: emos
+    description: "Kairos EMOS — challenger, only after NBM baseline is beaten OOS"
+    availability_offset_min: 0
+
+  - id: metar
+    description: "METAR observations — only as a same-day adjustment feature, never as forecast"
+    availability_offset_min: 5

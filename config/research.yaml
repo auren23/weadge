@@ -1,0 +1,54 @@
+# Research configuration (alpha gates, dataset, backtest defaults).
+
+dataset:
+  series: "KXHIGHNY"
+  snapshots_lead_hours: [24, 12, 6, 3, 1]   # fixed decision offsets before close, not every minute
+  candle_interval: "1m"
+  min_quote_price: 0.01
+  max_quote_price: 0.99
+
+research:
+  # Brier / LogLoss baseline comparison
+  baselines: ["market", "kalshi_forecast", "nbm"]
+  lead_buckets:
+    - { label: "24-48h", min_hours: 24, max_hours: 48 }
+    - { label: "12-24h", min_hours: 12, max_hours: 24 }
+    - { label: "6-12h",  min_hours: 6,  max_hours: 12 }
+    - { label: "3-6h",   min_hours: 3,  max_hours: 6 }
+    - { label: "1-3h",   min_hours: 1,  max_hours: 3 }
+    - { label: "<1h",    min_hours: 0,  max_hours: 1 }
+
+  # Incremental alpha test: logit(P(Y=1)) = a + b*logit(p_market) + g*logit(p_weather)
+  # Gamma must be significant OUT of sample.
+  incremental:
+    models:
+      M0: ["market"]                 # market only
+      M1: ["weather"]                # weather only
+      M2: ["market", "weather"]      # both
+    min_significance: 0.05
+
+  # Execution delay stress test (minutes after signal bar)
+  execution_delays_min: [1, 2, 5, 10]
+
+alpha_gates:
+  G0_data:        { settlement_mismatch: 0 }
+  G1_forecast:    { oos_skill_gt_baseline: true }
+  G2_incremental: { gamma_significant_oos: true }
+  G3_economic:    { net_ev_gt_zero_after_fees: true }
+  G4_robustness:  { edge_bins_monotonic: true, walk_forward_survives: true }
+
+backtest:
+  taker:
+    edge_threshold: 0.06          # min model minus ask before trading (pre-fee)
+    min_bid_ask_spread: 0.00
+    hold_to_settlement: true
+  bootstrap:
+    cluster_unit: "event_date"    # city x date is the independence unit — never per-trade
+    n_boot: 2000
+    ci_level: 0.95
+
+fees:
+  # v0 rule: fee schedule is ALWAYS replayed from series fee_changes history.
+  # These defaults are only a fallback when fee history is unavailable.
+  fallback_fee_multiplier: 0.07
+  fallback_fee_type: "taker"
