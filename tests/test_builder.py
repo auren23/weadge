@@ -31,9 +31,10 @@ def _events() -> pl.DataFrame:
 def _markets() -> pl.DataFrame:
     rows = []
     for ticker, lo, hi, result in [
-        (f"{EVENT}-M1", 88.0, 90.0, "no"),
-        (f"{EVENT}-M2", 90.0, 92.0, "yes"),
-        (f"{EVENT}-M3", 92.0, None, "no"),
+        (f"{EVENT}-M1", None, 88.0, "no"),   # unbounded lower tail
+        (f"{EVENT}-M2", 88.0, 90.0, "no"),
+        (f"{EVENT}-M3", 90.0, 92.0, "yes"),
+        (f"{EVENT}-M4", 92.0, None, "no"),   # unbounded upper tail
     ]:
         rows.append(
             {
@@ -57,7 +58,7 @@ def _markets() -> pl.DataFrame:
 
 def _quotes() -> pl.DataFrame:
     frames = []
-    for i, (bid, ask) in enumerate([(0.20, 0.25), (0.70, 0.75), (0.10, 0.15)]):
+    for i, (bid, ask) in enumerate([(0.10, 0.15), (0.20, 0.25), (0.70, 0.75), (0.10, 0.15)]):
         frames.append(
             make_quotes(
                 f"{EVENT}-M{i + 1}",
@@ -114,19 +115,19 @@ def builder() -> AlphaDatasetBuilder:
 class TestAlphaDataset:
     def test_shape(self, builder) -> None:
         df = builder.build()
-        assert df.height == 3 * len(SNAPSHOTS)   # 3 markets x 5 snapshots
-        assert sorted(df["lead_hours"].to_list()) == sorted([24.0, 12.0, 6.0, 3.0, 1.0] * 3)
+        assert df.height == 4 * len(SNAPSHOTS)   # 4 markets x 5 snapshots
+        assert sorted(df["lead_hours"].to_list()) == sorted([24.0, 12.0, 6.0, 3.0, 1.0] * 4)
 
     def test_result_column(self, builder) -> None:
         df = builder.build()
         by_market = df.group_by("market_ticker").first().select(
             "market_ticker", "result"
         ).sort("market_ticker")
-        assert by_market["result"].to_list() == [0, 1, 0]
+        assert by_market["result"].to_list() == [0, 0, 1, 0]
 
     def test_market_probability_from_quote(self, builder) -> None:
         df = builder.build()
-        row = df.filter(pl.col("market_ticker") == f"{EVENT}-M2").filter(
+        row = df.filter(pl.col("market_ticker") == f"{EVENT}-M3").filter(
             pl.col("lead_hours") == 24.0
         ).row(0, named=True)
         # at close-24h the quote drift = i/n with i = (close-24h - start)/1min
@@ -145,16 +146,44 @@ class TestAlphaDataset:
     def test_latest_knowable_forecast_per_snapshot(self, builder) -> None:
         df = builder.build()
         # early run (mean 88) is the only one knowable at close-24h:
-        #   N(88,2) -> P(90<=X<92) ~ 0.16
+        #   N(88,2) -> P(90<=X<92) ~ 0.14
         # mid run (mean 91) is knowable at close-1h:
         #   N(91,2) -> P(90<=X<92) ~ 0.38
-        early_row = df.filter(pl.col("market_ticker") == f"{EVENT}-M2").filter(
+        early_row = df.filter(pl.col("market_ticker") == f"{EVENT}-M3").filter(
             pl.col("lead_hours") == 24.0
         ).row(0, named=True)
-        late_row = df.filter(pl.col("market_ticker") == f"{EVENT}-M2").filter(
+        late_row = df.filter(pl.col("market_ticker") == f"{EVENT}-M3").filter(
             pl.col("lead_hours") == 1.0
         ).row(0, named=True)
         assert late_row["p_nbm"] > early_row["p_nbm"] + 0.1
+
+    def test_bucket_sum_guard_rejects_partial_partition(self) -> None:
+        """A market ladder missing a bucket must fail the sum~1 guard."""
+        markets = _markets().filter(pl.col("floor_strike").is_not_null())  # drop lower tail
+        fee = FeeSchedule([(datetime(2026, 6, 1, 0, 0, tzinfo=UTC), "taker", 1.0)])
+        broken = AlphaDatasetBuilder(
+            events=_events(),
+            markets=markets,
+            quotes=_quotes(),
+            forecast_percentiles=_percentiles(),
+            forecasts=_forecasts(),
+            fee_schedule=fee,
+            snapshots_lead_hours=SNAPSHOTS,
+        )
+        with pytest.raises(ValueError, match="sum to 1"):
+            broken.build()
+
+    def test_nbm_priority_is_mean_std_then_percentiles(self, builder) -> None:
+        """With mean/std present the Normal baseline wins; percentiles are
+        only a fallback — never an override."""
+        df = builder.build()
+        row = df.filter(pl.col("market_ticker") == f"{EVENT}-M3").filter(
+            pl.col("lead_hours") == 24.0
+        ).row(0, named=True)
+        from scipy import stats as _stats
+
+        expected = _stats.norm.cdf(92.0, 88.0, 2.0) - _stats.norm.cdf(90.0, 88.0, 2.0)
+        assert row["p_nbm"] == pytest.approx(expected, abs=1e-9)
 
     def test_fee_from_schedule_at_decision_time(self, builder) -> None:
         """Fee = round_up_to_cent(M * 0.07 * P * (1-P)), NOT price * M."""

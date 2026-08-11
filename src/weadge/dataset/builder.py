@@ -81,7 +81,29 @@ class AlphaDatasetBuilder:
         if not rows:
             return empty_frame("alpha_dataset")
         df = pl.DataFrame(rows, schema=ALPHA_DATASET_SCHEMA)
-        return df.sort(["event_date", "market_ticker", "decision_at"])
+        df = df.sort(["event_date", "market_ticker", "decision_at"])
+        self._assert_bucket_distributions(df)
+        return df
+
+    def _assert_bucket_distributions(self, df: pl.DataFrame, tolerance: float = 1e-6) -> None:
+        """Every (event, snapshot) partition of p_nbm must sum to ~1.
+
+        The markets of one KXHIGH event are mutually exclusive buckets of the
+        same outcome; if their model probabilities do not form a distribution,
+        every downstream comparison (including vs raw market mids) is biased.
+        """
+        sums = (
+            df.filter(pl.col("p_nbm").is_not_null())
+            .group_by(["event_date", "decision_at"])
+            .agg(pl.col("p_nbm").sum().alias("sum_p"))
+            .filter((pl.col("sum_p") - 1.0).abs() > tolerance)
+        )
+        if not sums.is_empty():
+            offenders = sums.head(5).to_dicts()
+            raise ValueError(
+                "p_nbm bucket probabilities must sum to 1 per (event, snapshot), "
+                f"got sums {offenders} (tolerance {tolerance})"
+            )
 
     # ----------------------------------------------------------------- row
     def _build_row(

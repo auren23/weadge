@@ -1,8 +1,9 @@
 """Probability features for the alpha dataset.
 
-    p_market          — mid price of the latest 1m quote (clamped)
-    p_kalshi_forecast — Kalshi's own percentile history, interpolated to the bucket
-    p_nbm             — NBM distribution (normal or percentile) over the bucket
+    p_market          — mid price of the latest completed 1m quote (exact, no cent clamp)
+    p_kalshi_forecast — Kalshi's own percentile history, fit to a Normal over the bucket
+    p_nbm             — NBM distribution over the bucket (Normal mean/std first,
+                        percentile-fit Normal as fallback)
 
 The Kalshi forecast is labelled `kalshi_forecast`, never `nbm` — provenance
 is undocumented.
@@ -24,7 +25,7 @@ from weadge.domain.probability import (
 
 
 def market_probability_from_quote(quote: pl.DataFrame | None) -> float | None:
-    """Mid close of the quote snapshot -> probability."""
+    """Mid close of the quote snapshot -> probability (exact, no cent clamp)."""
     if quote is None or quote.is_empty():
         return None
     mid = quote["mid_close"][0]
@@ -41,6 +42,7 @@ def kalshi_forecast_probability(
     """Interpolate P(bucket) from the Kalshi forecast percentile history.
 
     Uses the latest end_period bucket at or before `decision_at` for the event.
+    The percentile pairs are fit to a Normal (no flat tail extrapolation).
     """
     snap = snapshot_forecast_percentiles(percentiles, decision_at)
     if snap.is_empty():
@@ -68,7 +70,9 @@ def nbm_bucket_probability(
 ) -> float | None:
     """Latest NBM (or other source) forecast knowable at T, bucket probability.
 
-    Uses percentiles p10..p90 when present, else Normal(mean, std).
+    Priority: Normal(mean, std) baseline first; only when mean/std are
+    missing do we fall back to a Normal fit on p10..p90. Percentile
+    interpolation must never override a real distribution.
     """
     from weadge.dataset.alignment import latest_knowable
 
@@ -87,12 +91,12 @@ def nbm_bucket_probability(
     if row.is_empty():
         return None
     r = row.row(0, named=True)
+    if r.get("mean") is not None and r.get("std") is not None:
+        return bucket_probability_from_normal(r["mean"], r["std"], bucket_low, bucket_high)
     pcts = {p: r.get(col) for p, col in [(10, "p10"), (25, "p25"), (50, "p50"), (75, "p75"), (90, "p90")]}
     pcts = {p: v for p, v in pcts.items() if v is not None}
     if len(pcts) >= 2:
         return bucket_probability_from_percentiles(pcts, bucket_low, bucket_high)
-    if r.get("mean") is not None and r.get("std") is not None:
-        return bucket_probability_from_normal(r["mean"], r["std"], bucket_low, bucket_high)
     return None
 
 
