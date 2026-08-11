@@ -26,6 +26,7 @@ Statistical discipline (both are P0 for this file):
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -34,6 +35,15 @@ import statsmodels.api as sm
 
 from weadge.domain.probability import prob_to_logit
 
+# Market probabilities are midpoints of 1-cent quotes: certainty beyond
+# ~0.999 (logit +-7) is quote noise, not signal. Clipping the logit
+# FEATURES keeps the logistic fit finite under the near-perfect
+# separation that short-lead market prices produce (Newton's Hessian
+# goes singular when a coefficient is unbounded). The same transform is
+# applied to train and test, so the paired M0/M1/M2 comparison is
+# unchanged.
+LOGIT_FEATURE_CLIP = 7.0
+
 
 @dataclass(frozen=True)
 class IncrementalResult:
@@ -41,8 +51,8 @@ class IncrementalResult:
     features: tuple[str, ...]
     train_n: int
     test_n: int
-    gamma: float | None          # weather coefficient in M2 (in-sample, auxiliary)
-    gamma_pvalue: float | None   # two-sided p-value of gamma in M2 (auxiliary)
+    gamma: float | None  # weather coefficient in M2 (in-sample, auxiliary)
+    gamma_pvalue: float | None  # two-sided p-value of gamma in M2 (auxiliary)
     test_log_loss: float
     test_brier: float
 
@@ -61,8 +71,8 @@ class IncrementalGateResult:
     delta_ll: float
     ci_lower: float
     ci_upper: float
-    gamma: float | None          # in-sample M2 weather coefficient (auxiliary)
-    gamma_pvalue: float | None   # in-sample p-value (auxiliary, NOT the gate)
+    gamma: float | None  # in-sample M2 weather coefficient (auxiliary)
+    gamma_pvalue: float | None  # in-sample p-value (auxiliary, NOT the gate)
     test_n: int
     n_clusters: int
     seed: int
@@ -78,7 +88,20 @@ class IncrementalGateResult:
 
 def _logit_matrix(df: pl.DataFrame, feature_cols: list[str]) -> np.ndarray:
     X = np.column_stack([prob_to_logit(df[c].to_numpy()) for c in feature_cols])
+    X = np.clip(X, -LOGIT_FEATURE_CLIP, LOGIT_FEATURE_CLIP)
     return np.asarray(X, dtype=float)
+
+
+def _fit_logit(y: np.ndarray, X: np.ndarray):
+    """Logistic fit robust to near-perfect separation: BFGS + clipped
+    features keep the optimum finite. Returns None on failure — the caller
+    then fails closed (the window is degenerate for inference)."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # PerfectSeparationWarning etc.
+            return sm.Logit(y, sm.add_constant(X)).fit(disp=0, method="bfgs", maxiter=200)
+    except Exception:
+        return None
 
 
 def _log_loss(y: np.ndarray, p: np.ndarray) -> float:
@@ -144,12 +167,20 @@ def fit_incremental(
         X_te_m = X_te[idx_te][:, cols]
         if len(np.unique(y_tr)) < 2 or len(y_tr) < 10 or len(y_te) == 0:
             results.append(
-                IncrementalResult(name, tuple(feats), len(y_tr), len(y_te),
-                                  None, None, float("nan"), float("nan"))
+                IncrementalResult(
+                    name, tuple(feats), len(y_tr), len(y_te), None, None, float("nan"), float("nan")
+                )
             )
             continue
 
-        logit = sm.Logit(y_tr, sm.add_constant(X_tr_m)).fit(disp=0)
+        logit = _fit_logit(y_tr, X_tr_m)
+        if logit is None:  # degenerate fit — fail closed, paired mask intact
+            results.append(
+                IncrementalResult(
+                    name, tuple(feats), len(y_tr), len(y_te), None, None, float("nan"), float("nan")
+                )
+            )
+            continue
         pred = logit.predict(sm.add_constant(X_te_m))
         gamma = None
         gamma_p = None
@@ -208,8 +239,10 @@ def paired_incremental_gate(
     if len(y_tr) < 10 or len(np.unique(y_tr)) < 2 or len(y_te) == 0:
         return empty
 
-    m0 = sm.Logit(y_tr, sm.add_constant(X_tr_k[:, [0]])).fit(disp=0)
-    m2 = sm.Logit(y_tr, sm.add_constant(X_tr_k)).fit(disp=0)
+    m0 = _fit_logit(y_tr, X_tr_k[:, [0]])
+    m2 = _fit_logit(y_tr, X_tr_k)
+    if m0 is None or m2 is None:  # degenerate fit — fail closed
+        return empty
     p0 = m0.predict(sm.add_constant(X_te_k[:, [0]]))
     p2 = m2.predict(sm.add_constant(X_te_k))
 
@@ -223,9 +256,16 @@ def paired_incremental_gate(
     n_clusters = len(unique_clusters)
     if n_clusters < 2:
         # a single cluster cannot support clustered inference — fail closed
-        return IncrementalGateResult(mean_delta, float("nan"), float("nan"),
-                                     float(m2.params[-1]), float(m2.pvalues[-1]),
-                                     len(y_te), n_clusters, seed)
+        return IncrementalGateResult(
+            mean_delta,
+            float("nan"),
+            float("nan"),
+            float(m2.params[-1]),
+            float(m2.pvalues[-1]),
+            len(y_te),
+            n_clusters,
+            seed,
+        )
 
     sums = np.zeros(n_clusters)
     counts = np.zeros(n_clusters)

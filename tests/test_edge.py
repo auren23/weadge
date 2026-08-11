@@ -83,6 +83,24 @@ class TestFitIncremental:
         assert gate.delta_ll > 0
         assert gate.ci_lower > 0
         assert gate.has_incremental_alpha
+
+    def test_perfect_separation_does_not_crash(self) -> None:
+        """Short-lead market prices are near 0/1: the logit fit must stay
+        finite (clipped logit features + BFGS) or fail closed — never raise."""
+        df = _synthetic(seed=3)
+        df = df.with_columns(
+            pl.when(pl.col("result") == 1)
+            .then(pl.lit(0.9999))
+            .otherwise(pl.lit(0.0001))
+            .alias("p_market")
+        )
+        train, test = _split(df)
+        res = fit_incremental(train, test)
+        gate = paired_incremental_gate(train, test)
+        # all models either produced finite metrics or failed closed with NaN
+        for r in res:
+            assert r.test_log_loss == r.test_log_loss or np.isnan(r.test_log_loss)
+        assert gate.delta_ll == gate.delta_ll or np.isnan(gate.delta_ll)
         # gamma is reported but as auxiliary evidence
         assert gate.gamma is not None and gate.gamma > 0
 
@@ -146,10 +164,16 @@ class TestPairedGate:
         assert not gate.has_incremental_alpha  # degenerate window -> NaN gate
 
     def test_gate_requires_both_mean_and_ci(self) -> None:
-        assert not IncrementalGateResult(0.01, -0.001, 0.02, None, None, 10, 3, 0).has_incremental_alpha
+        assert not IncrementalGateResult(
+            0.01, -0.001, 0.02, None, None, 10, 3, 0
+        ).has_incremental_alpha
         assert IncrementalGateResult(0.01, 0.001, 0.02, None, None, 10, 3, 0).has_incremental_alpha
-        assert not IncrementalGateResult(-0.01, 0.001, 0.02, None, None, 10, 3, 0).has_incremental_alpha
-        assert not IncrementalGateResult(float("nan"), 0.001, 0.02, None, None, 10, 3, 0).has_incremental_alpha
+        assert not IncrementalGateResult(
+            -0.01, 0.001, 0.02, None, None, 10, 3, 0
+        ).has_incremental_alpha
+        assert not IncrementalGateResult(
+            float("nan"), 0.001, 0.02, None, None, 10, 3, 0
+        ).has_incremental_alpha
 
     def test_default_market_baseline_is_simplex(self) -> None:
         """The default M0 is p_market_simplex — research must never silently
