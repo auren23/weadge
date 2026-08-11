@@ -212,6 +212,10 @@ class TestBackfill:
         assert f030[0]["valid_end"] == datetime(2026, 7, 16, 6, tzinfo=UTC)
         assert f030[0]["model_version"] == "nbm_v5.0.x"
         assert f030[0]["available_at"] == datetime(2026, 7, 15, 7, 15, tzinfo=UTC)
+        # storage unit is °F (fake field = 300.0 K -> 80.33°F), matching the
+        # Kalshi strike scale the builder feeds bucket probabilities against
+        assert f030[0]["mean"] == pytest.approx(80.33, abs=1e-9)
+        assert f030[0]["std"] == pytest.approx(540.0, abs=1e-9)  # 300.0 K * 9/5
         # ...and its day-2 row (same calendar window as the next run's day-1)
         f054 = [
             r

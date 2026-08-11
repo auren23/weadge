@@ -26,6 +26,10 @@ DATA CHAIN (all verified live on July 2026 data, AWS noaa-nbm-grib2-pds):
     the local land-patch max rather than the nearest (often water) grid
     point; KNYC's nearest point is itself the right cell (matches the
     card and the 2026-07-15 observed 95F vs forecast mean 96F).
+  * Stored units: mean/p10..p90 and std are °F — the unit of Kalshi
+    strikes, DCR observations, and the NBP text product (a °C value fed
+    against °F strikes silently dumps the whole distribution into the
+    wrong bucket — the sum-to-1 guard cannot catch it).
   * Observed archive availability: the 00Z run's f030 qmd object appears
     ~07:15Z (S3 Last-Modified). That is AFTER the T-24h snapshot
     (D 04:59Z), so T-24h is served by the D-1 run's f054 (available
@@ -331,6 +335,12 @@ def _window_for(run_init: datetime, fhour: int) -> tuple[datetime, datetime]:
     return run_init + timedelta(hours=fhour - 18), run_init + timedelta(hours=fhour)
 
 
+def _f_to_f(kelvin: float) -> float:
+    """Kelvin -> Fahrenheit (storage unit of the forecasts table: Kalshi
+    strikes, DCR observations, and the NBP text product are all °F)."""
+    return (kelvin - 273.15) * 9 / 5 + 32
+
+
 def _object_last_modified(url: str, cache: dict[str, datetime], client: Any) -> datetime | None:
     """S3 Last-Modified of an object = observed archive availability."""
     if url in cache:
@@ -469,15 +479,19 @@ def backfill_nbm(
                         "station_id": station_id,
                         "lat": lat,
                         "lon": lon,
-                        "mean": nearest_value(qmd["mean"], lat, lon) - 273.15
+                        # stored in °F — the unit of Kalshi strikes, DCR
+                        # observations, and the NBP text product
+                        "mean": _f_to_f(nearest_value(qmd["mean"], lat, lon))
                         if "mean" in qmd
                         else None,
-                        "std": nearest_value(qmd["std"], lat, lon) if "std" in qmd else None,
-                        "p10": nearest_value(qmd["p10"], lat, lon) - 273.15,
-                        "p25": nearest_value(qmd["p25"], lat, lon) - 273.15,
-                        "p50": nearest_value(qmd["p50"], lat, lon) - 273.15,
-                        "p75": nearest_value(qmd["p75"], lat, lon) - 273.15,
-                        "p90": nearest_value(qmd["p90"], lat, lon) - 273.15,
+                        "std": nearest_value(qmd["std"], lat, lon) * 9 / 5
+                        if "std" in qmd
+                        else None,
+                        "p10": _f_to_f(nearest_value(qmd["p10"], lat, lon)),
+                        "p25": _f_to_f(nearest_value(qmd["p25"], lat, lon)),
+                        "p50": _f_to_f(nearest_value(qmd["p50"], lat, lon)),
+                        "p75": _f_to_f(nearest_value(qmd["p75"], lat, lon)),
+                        "p90": _f_to_f(nearest_value(qmd["p90"], lat, lon)),
                         "raw_payload_path": str(payload),
                     }
                 )
