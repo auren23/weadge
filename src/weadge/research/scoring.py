@@ -30,17 +30,27 @@ def score_frame(
     prob_columns: list[str],
     label_col: str = "result",
 ) -> pl.DataFrame:
-    """One row per probability column: Brier + LogLoss over all rows."""
-    y = df[label_col].to_numpy()
+    """One row per probability column: Brier + LogLoss over all rows.
+
+    Fail-closed columns (e.g. p_market_normalized / p_market_simplex when a
+    partition is incomplete) carry nulls; each model is scored on its
+    NON-NULL rows only, and `n` reports that count.
+    """
+    y = df[label_col].to_numpy().astype(float)
     rows = []
     for col in prob_columns:
-        p = df[col].to_numpy()
+        p_full = df[col].to_numpy().astype(float)
+        mask = ~np.isnan(p_full)
+        p = p_full[mask]
+        if len(p) == 0:
+            rows.append({"model": col, "n": 0, "brier": float("nan"), "log_loss": float("nan")})
+            continue
         rows.append(
             {
                 "model": col,
                 "n": len(p),
-                "brier": brier_score(y, p),
-                "log_loss": log_loss(y, p),
+                "brier": brier_score(y[mask], p),
+                "log_loss": log_loss(y[mask], p),
             }
         )
     return pl.DataFrame(rows)

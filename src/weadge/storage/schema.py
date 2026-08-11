@@ -125,8 +125,19 @@ FORECAST_SCHEMA: Schema = {
     "raw_payload_path": pl.Utf8,
 }
 
-# gold/alpha_dataset — one row per (event, market, snapshot)
+# gold/alpha_dataset — one row per (event, market, snapshot).
+# Market probabilities come in three flavors — they answer three different
+# questions and research code must never write a bare `p_market`:
+#   p_market_raw        — the bucket's own mid (bid+ask)/2, no cross-bucket fix
+#   p_market_normalized — raw / sum(raw) over the event's partition, ONLY when
+#                         every bucket has a valid mid (else NULL, fail closed)
+#   p_market_simplex    — box-constrained projection of mids onto the simplex
+#                         (sum q = 1, bid <= q <= ask), NULL when infeasible
+# market_prob_sum_raw / market_bid_sum / market_ask_sum are partition-level
+# diagnostics: "bid_sum <= prob_sum <= ask_sum" eyeballs simplex feasibility.
 ALPHA_DATASET_SCHEMA: Schema = {
+    "series_ticker": pl.Utf8,
+    "event_ticker": pl.Utf8,
     "event_date": pl.Datetime("us", time_zone="UTC"),
     "city": pl.Utf8,
     "decision_at": pl.Datetime("us", time_zone="UTC"),
@@ -137,7 +148,13 @@ ALPHA_DATASET_SCHEMA: Schema = {
     "market_bid": pl.Float64,
     "market_ask": pl.Float64,
     "market_mid": pl.Float64,
-    "p_market": pl.Float64,
+    "p_market_raw": pl.Float64,
+    "p_market_normalized": pl.Float64,
+    "p_market_simplex": pl.Float64,
+    "market_prob_sum_raw": pl.Float64,
+    "market_bid_sum": pl.Float64,
+    "market_ask_sum": pl.Float64,
+    "market_simplex_feasible": pl.Boolean,
     "p_kalshi_forecast": pl.Float64,
     "p_nbm": pl.Float64,
     "p_gefs": pl.Float64,

@@ -1,7 +1,8 @@
 """Model layer.
 
 v0 model policy (from the research plan):
-  * Market       — the baseline; p_market comes straight from the dataset
+  * Market       — the baseline; p_market_simplex (box-constrained projection
+                   of the bucket mids) is the default market construction
   * NBM          — the free calibrated baseline (consumed as p_nbm)
   * Stack        — logistic stacking of market + weather (M2 in edge.py)
   * EMOS/GEFS    — challengers ONLY after the NBM baseline is beaten OOS
@@ -22,7 +23,7 @@ from weadge.domain.probability import prob_to_logit
 def stack_probability(
     train: pl.DataFrame,
     test: pl.DataFrame,
-    market_col: str = "p_market",
+    market_col: str = "p_market_simplex",
     weather_col: str = "p_nbm",
     label_col: str = "result",
 ) -> pl.Series:

@@ -196,55 +196,74 @@ app.add_typer(research_app, name="research")
 
 @research_app.command("compare")
 def research_compare(series: _series_opt) -> None:
-    """Brier / LogLoss table: Market vs KalshiForecast vs NBM."""
+    """Brier / LogLoss table: Market (raw/normalized/simplex) vs KalshiForecast vs NBM."""
     from weadge.research.scoring import score_frame
 
     df = _load_gold(series)
-    table = score_frame(df, ["p_market", "p_kalshi_forecast", "p_nbm"])
+    table = score_frame(
+        df,
+        ["p_market_raw", "p_market_normalized", "p_market_simplex",
+         "p_kalshi_forecast", "p_nbm"],
+    )
     console.print(table)
 
 
 @research_app.command("calibration")
 def research_calibration(series: _series_opt) -> None:
-    """Reliability index per model."""
+    """Reliability index per model (Market raw/normalized/simplex, KF, NBM)."""
     from weadge.research.calibration import calibration_table
 
     df = _load_gold(series)
-    console.print(calibration_table(df, ["p_market", "p_kalshi_forecast", "p_nbm"]))
+    console.print(
+        calibration_table(
+            df,
+            ["p_market_raw", "p_market_normalized", "p_market_simplex",
+             "p_kalshi_forecast", "p_nbm"],
+        )
+    )
 
 
 @research_app.command("incremental")
 def research_incremental(series: _series_opt) -> None:
     """Alpha existence test: does weather add OOS info given the market?
 
-    Walk-forward, paired samples, event/date clustered bootstrap:
-    gate = mean OOS delta_ll (M0 vs M2) > 0 AND 95% cluster CI > 0.
+    Walk-forward, paired samples, event/date clustered bootstrap, run for
+    EACH market construction (raw / normalized / simplex). Weather alpha is
+    only credible if it survives all three M0 baselines.
     """
     from weadge.research.edge import paired_incremental_gate
     from weadge.research.walk_forward import split_frame
 
     df = _load_gold(series)
     dates = sorted(df["event_date"].unique().to_list())
-    wins = total = 0
+    baselines = ["p_market_raw", "p_market_normalized", "p_market_simplex"]
+    wins = {b: 0 for b in baselines}
+    total = 0
     for i in range(len(dates) - 3):
         train_start, test_start = dates[i], dates[i + 3]
         train, test = split_frame(df, train_start, test_start)
         if test.is_empty():
             continue
-        g = paired_incremental_gate(train, test)
         total += 1
-        wins += int(g.has_incremental_alpha)
-        flag = "ALPHA" if g.has_incremental_alpha else "none"
+        for base in baselines:
+            g = paired_incremental_gate(train, test, market_col=base)
+            wins[base] += int(g.has_incremental_alpha)
+            flag = "ALPHA" if g.has_incremental_alpha else "none"
+            console.print(
+                f"{test_start.date()} M0={base:<22} delta_ll={g.delta_ll:+.4f} "
+                f"95% CI=[{g.ci_lower:+.4f}, {g.ci_upper:+.4f}] "
+                f"gamma={g.gamma if g.gamma is None else f'{g.gamma:+.3f}'} "
+                f"n={g.test_n} clusters={g.n_clusters} -> {flag}"
+            )
+    for base in baselines:
+        console.print(f"incremental alpha vs {base}: {wins[base]}/{total} windows")
+    if all(wins[b] == total for b in baselines):
+        console.print("[green]weather alpha robust to market construction[/green]")
+    elif wins["p_market_raw"] == total and wins["p_market_simplex"] < total:
         console.print(
-            f"{test_start.date()} delta_ll={g.delta_ll:+.4f} "
-            f"95% CI=[{g.ci_lower:+.4f}, {g.ci_upper:+.4f}] "
-            f"gamma={g.gamma if g.gamma is None else f'{g.gamma:+.3f}'} "
-            f"n={g.test_n} clusters={g.n_clusters} -> {flag}"
+            "[red]weather alpha does NOT survive the simplex baseline — this is "
+            "likely market-probability-normalization alpha, not weather alpha[/red]"
         )
-    console.print(
-        f"incremental alpha in {wins}/{total} windows "
-        f"(mean delta_ll > 0 & 95% cluster CI lower bound > 0)"
-    )
 
 
 @research_app.command("latency")
@@ -293,7 +312,7 @@ app.add_typer(backtest_app, name="backtest")
 @backtest_app.command("taker")
 def backtest_taker(
     series: _series_opt,
-    model: Annotated[str, typer.Option("--model", help="p_nbm | p_market | p_kalshi_forecast")] = "p_nbm",
+    model: Annotated[str, typer.Option("--model", help="p_nbm | p_market_raw | p_market_normalized | p_market_simplex | p_kalshi_forecast")] = "p_nbm",
     edge: Annotated[float, typer.Option("--edge", help="minimum pre-fee edge")] = 0.06,
 ) -> None:
     """Taker backtest: BUY YES if p_model - ask >= edge; delayed fills; fee replay."""

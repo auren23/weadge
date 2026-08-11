@@ -138,7 +138,7 @@ class TestAlphaDataset:
         drift = i / (26 * 60) * 0.1
         expected_mid = (0.70 + drift + 0.75 + drift) / 2.0
         assert row["market_mid"] == pytest.approx(expected_mid, abs=1e-9)
-        assert row["p_market"] == pytest.approx(expected_mid, abs=1e-9)
+        assert row["p_market_raw"] == pytest.approx(expected_mid, abs=1e-9)
 
     def test_no_leak_bait_used(self, builder) -> None:
         """The forecast available only after close must never appear."""
@@ -207,3 +207,84 @@ class TestAlphaDataset:
     def test_all_decision_times_are_before_close(self, builder) -> None:
         df = builder.build()
         assert (df["decision_at"] < CLOSE).all()
+
+    def test_market_baselines_present(self, builder) -> None:
+        """Phase B fills partition-level baselines. The default fixture's
+        books (bid base sum 1.10 > 1, before drift) are a REAL infeasible
+        partition: the finding must be preserved, not smoothed away."""
+        df = builder.build()
+        assert "p_market_raw" in df.columns
+        assert "p_market_normalized" in df.columns
+        assert "p_market_simplex" in df.columns
+        # raw is per-bucket mid; normalized exists (all buckets quoted) and
+        # each (event, snapshot) partition sums to 1
+        assert df["p_market_normalized"].null_count() == 0
+        n_partitions = df.select(["series_ticker", "event_ticker", "decision_at"]).unique().height
+        assert df["p_market_normalized"].to_numpy().sum() == pytest.approx(n_partitions, abs=1e-9)
+        # infeasible books: bid floor alone exceeds 1 -> simplex fails closed
+        assert df["market_simplex_feasible"].to_list() == [False] * df.height
+        assert df["p_market_simplex"].null_count() == df.height
+        assert (df["market_bid_sum"] > 1.0).all()
+        # the diagnostics eyeball still holds: bid_sum <= prob_sum <= ask_sum
+        assert (df["market_bid_sum"] <= df["market_prob_sum_raw"]).all()
+        assert (df["market_prob_sum_raw"] <= df["market_ask_sum"]).all()
+
+    def test_market_baselines_feasible_partition(self) -> None:
+        """With books satisfying bid_sum <= 1 <= ask_sum, the simplex
+        projection exists: sum q = 1 and bid <= q <= ask for every row.
+        Quote bases are chosen so the fixture's price drift keeps EVERY
+        partition feasible: bid sum 0.53 + 4*0.0961 <= 1 and
+        ask sum 0.98 + 4*0.0076 >= 1 across all five snapshots."""
+        frames = []
+        for i, (bid, ask) in enumerate([(0.10, 0.22), (0.12, 0.24), (0.15, 0.25), (0.16, 0.27)]):
+            frames.append(
+                make_quotes(
+                    f"{EVENT}-M{i + 1}",
+                    shift(CLOSE, hours=-26),
+                    26 * 60,
+                    bid_base=bid,
+                    ask_base=ask,
+                )
+            )
+        quotes = pl.concat(frames)
+        fee = FeeSchedule([(datetime(2026, 6, 1, 0, 0, tzinfo=UTC), "taker", 1.0)])
+        b = AlphaDatasetBuilder(
+            events=_events(),
+            markets=_markets(),
+            quotes=quotes,
+            forecast_percentiles=_percentiles(),
+            forecasts=_forecasts(),
+            fee_schedule=fee,
+            snapshots_lead_hours=SNAPSHOTS,
+        )
+        df = b.build()
+        assert df["market_simplex_feasible"].to_list() == [True] * df.height
+        by_partition = df.group_by(["series_ticker", "event_ticker", "decision_at"]).agg(
+            pl.col("p_market_simplex").sum().alias("simplex_sum"),
+            pl.col("p_market_normalized").sum().alias("norm_sum"),
+        )
+        assert (by_partition["simplex_sum"] - 1.0).abs().max() < 1e-9
+        assert (by_partition["norm_sum"] - 1.0).abs().max() < 1e-9
+        assert (df["p_market_simplex"] >= df["market_bid"] - 1e-12).all()
+        assert (df["p_market_simplex"] <= df["market_ask"] + 1e-12).all()
+
+    def test_missing_market_quote_fails_closed(self) -> None:
+        """One bucket with no quote -> normalized/simplex NULL for the whole
+        (event, snapshot), even though other buckets are fully quoted."""
+        quotes = _quotes().filter(pl.col("market_ticker") != f"{EVENT}-M3")
+        fee = FeeSchedule([(datetime(2026, 6, 1, 0, 0, tzinfo=UTC), "taker", 1.0)])
+        b = AlphaDatasetBuilder(
+            events=_events(),
+            markets=_markets(),
+            quotes=quotes,
+            forecast_percentiles=_percentiles(),
+            forecasts=_forecasts(),
+            fee_schedule=fee,
+            snapshots_lead_hours=SNAPSHOTS,
+        )
+        df = b.build()
+        assert df["market_mid"].null_count() == df.height // 4   # only M3 rows lack quotes
+        assert df["p_market_normalized"].null_count() == df.height  # whole partition fails closed
+        assert df["p_market_simplex"].null_count() == df.height
+        assert df["market_simplex_feasible"].to_list() == [False] * df.height
+        assert df["market_prob_sum_raw"].null_count() == df.height

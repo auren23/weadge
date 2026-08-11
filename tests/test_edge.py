@@ -49,7 +49,8 @@ def _synthetic(
     return pl.DataFrame(
         {
             "event_date": dates,
-            "p_market": market_p,
+            # named like the gold schema so the default market_col applies
+            "p_market_simplex": market_p,
             "p_nbm": weather_p,
             "result": y,
         }
@@ -149,6 +150,20 @@ class TestPairedGate:
         assert IncrementalGateResult(0.01, 0.001, 0.02, None, None, 10, 3, 0).has_incremental_alpha
         assert not IncrementalGateResult(-0.01, 0.001, 0.02, None, None, 10, 3, 0).has_incremental_alpha
         assert not IncrementalGateResult(float("nan"), 0.001, 0.02, None, None, 10, 3, 0).has_incremental_alpha
+
+    def test_default_market_baseline_is_simplex(self) -> None:
+        """The default M0 is p_market_simplex — research must never silently
+        fall back to the raw per-bucket mid."""
+        from weadge.research.edge import fit_incremental, paired_incremental_gate
+
+        df = _synthetic(weather_power=0.5, seed=9)
+        train, test = _split(df)
+        # these calls use the DEFAULT market_col and must resolve the
+        # p_market_simplex column the synthetic frame provides
+        res = fit_incremental(train, test)
+        gate = paired_incremental_gate(train, test)
+        assert res[0].test_n > 0
+        assert gate.n_clusters > 0
 
     def test_gate_is_deterministic(self) -> None:
         df = _synthetic(seed=6, weather_power=0.6)

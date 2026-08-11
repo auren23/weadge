@@ -46,6 +46,27 @@ class TestScoring:
             pl.col("model") == "p_market"
         )["brier"][0]
 
+    def test_score_frame_scores_non_null_rows_only(self) -> None:
+        """Fail-closed columns (e.g. p_market_simplex) can be partially null;
+        each model must be scored on its own non-null rows, with n reporting
+        that count — never NaN-poisoned aggregates."""
+        df = pl.DataFrame(
+            {
+                "result": [1, 0, 1, 0],
+                "p_market_raw": [0.6, 0.4, 0.7, 0.3],
+                "p_market_simplex": [0.6, None, 0.7, None],
+            }
+        )
+        table = score_frame(df, ["p_market_raw", "p_market_simplex"])
+        raw = table.filter(pl.col("model") == "p_market_raw").row(0, named=True)
+        sim = table.filter(pl.col("model") == "p_market_simplex").row(0, named=True)
+        assert raw["n"] == 4
+        assert sim["n"] == 2
+        assert np.isfinite(sim["brier"])
+        assert np.isfinite(sim["log_loss"])
+        # the two non-null simplex rows align with the same result labels
+        assert sim["brier"] == pytest.approx(brier_score(np.array([1.0, 1.0]), np.array([0.6, 0.7])))
+
     def test_score_by_lead_bucket(self) -> None:
         df = pl.DataFrame(
             {

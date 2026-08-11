@@ -119,7 +119,7 @@ def _paired_masks(
 def fit_incremental(
     train: pl.DataFrame,
     test: pl.DataFrame,
-    market_col: str = "p_market",
+    market_col: str = "p_market_simplex",
     weather_col: str = "p_nbm",
     label_col: str = "result",
 ) -> list[IncrementalResult]:
@@ -174,7 +174,7 @@ def fit_incremental(
 def paired_incremental_gate(
     train: pl.DataFrame,
     test: pl.DataFrame,
-    market_col: str = "p_market",
+    market_col: str = "p_market_simplex",
     weather_col: str = "p_nbm",
     label_col: str = "result",
     cluster_col: str = "event_date",

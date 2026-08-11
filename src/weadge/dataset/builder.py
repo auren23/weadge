@@ -14,6 +14,7 @@ import polars as pl
 
 from weadge.backtest.fees import FeeSchedule, series_fee_schedule
 from weadge.dataset.alignment import latest_completed_quote_at_or_before
+from weadge.dataset.market_probability import add_market_baselines
 from weadge.dataset.probability import (
     kalshi_forecast_probability,
     market_probability_from_quote,
@@ -81,27 +82,33 @@ class AlphaDatasetBuilder:
         if not rows:
             return empty_frame("alpha_dataset")
         df = pl.DataFrame(rows, schema=ALPHA_DATASET_SCHEMA)
+        # Phase B: partition-level market baselines (normalized / simplex /
+        # partition diagnostics) computed per (series_ticker, event_ticker,
+        # decision_at) — never per row.
+        df = add_market_baselines(df)
         df = df.sort(["event_date", "market_ticker", "decision_at"])
         self._assert_bucket_distributions(df)
         return df
 
     def _assert_bucket_distributions(self, df: pl.DataFrame, tolerance: float = 1e-6) -> None:
-        """Every (event, snapshot) partition of p_nbm must sum to ~1.
+        """Every (series, event, snapshot) partition of p_nbm must sum to ~1.
 
         The markets of one KXHIGH event are mutually exclusive buckets of the
         same outcome; if their model probabilities do not form a distribution,
         every downstream comparison (including vs raw market mids) is biased.
+        Keyed by event_ticker (not event_date) so different series on the
+        same day can never collide.
         """
         sums = (
             df.filter(pl.col("p_nbm").is_not_null())
-            .group_by(["event_date", "decision_at"])
+            .group_by(["series_ticker", "event_ticker", "decision_at"])
             .agg(pl.col("p_nbm").sum().alias("sum_p"))
             .filter((pl.col("sum_p") - 1.0).abs() > tolerance)
         )
         if not sums.is_empty():
             offenders = sums.head(5).to_dicts()
             raise ValueError(
-                "p_nbm bucket probabilities must sum to 1 per (event, snapshot), "
+                "p_nbm bucket probabilities must sum to 1 per (series, event, snapshot), "
                 f"got sums {offenders} (tolerance {tolerance})"
             )
 
@@ -128,14 +135,14 @@ class AlphaDatasetBuilder:
             bid, ask = q.get("yes_bid_close"), q.get("yes_ask_close")
             mid = q.get("mid_close")
 
-        p_market = market_probability_from_quote(quote)
+        p_market_raw = market_probability_from_quote(quote)
         p_kf = kalshi_forecast_probability(
             self.forecast_percentiles, decision_at, ev, low, high
         )
         p_nbm = nbm_bucket_probability(
             self.forecasts, decision_at, str(market.get("series_ticker", "")), low, high
         )
-        if p_market is None and p_kf is None and p_nbm is None:
+        if p_market_raw is None and p_kf is None and p_nbm is None:
             return None  # nothing knowable at this decision time — drop the row
 
         result = 1 if market.get("result") == "yes" else 0
@@ -146,6 +153,8 @@ class AlphaDatasetBuilder:
             fee = float("nan")
 
         return {
+            "series_ticker": str(market.get("series_ticker", "")),
+            "event_ticker": ev,
             "event_date": target,
             "city": str(market.get("series_ticker", "")),
             "decision_at": decision_at,
@@ -156,7 +165,7 @@ class AlphaDatasetBuilder:
             "market_bid": bid,
             "market_ask": ask,
             "market_mid": mid,
-            "p_market": p_market,
+            "p_market_raw": p_market_raw,
             "p_kalshi_forecast": p_kf,
             "p_nbm": p_nbm,
             "p_gefs": None,

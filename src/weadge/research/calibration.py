@@ -45,16 +45,22 @@ def calibration_table(
     label_col: str = "result",
     bins: int = 10,
 ) -> pl.DataFrame:
-    """Reliability index per model, plus overall observed frequency."""
-    y = df[label_col].to_numpy()
+    """Reliability index per model, plus overall observed frequency.
+
+    Each model is evaluated on its non-null rows only (fail-closed columns
+    like p_market_normalized can be partially null); `n` reports that count.
+    """
+    y = df[label_col].to_numpy().astype(float)
     rows = []
     for col in prob_columns:
-        p = df[col].to_numpy()
+        p_full = df[col].to_numpy().astype(float)
+        mask = ~np.isnan(p_full)
+        p = p_full[mask]
         rows.append(
             {
                 "model": col,
                 "n": len(p),
-                "reliability_index": reliability_index(y, p, bins),
+                "reliability_index": reliability_index(y[mask], p, bins),
                 "mean_p": float(np.nanmean(p)) if len(p) else float("nan"),
                 "base_rate": float(np.nanmean(y)) if len(y) else float("nan"),
             }
