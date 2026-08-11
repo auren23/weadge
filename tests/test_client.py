@@ -473,6 +473,46 @@ class TestParsing:
         assert "period_interval=60" in url
 
     @respx.mock
+    def test_forecast_percentile_microdegree_rescale(self) -> None:
+        """Live weather values arrive scaled by 1e6 (87.6° -> 87_600_000).
+        raw_numerical_forecast (exact) is preferred; both are rescaled."""
+        ts = int(CUTOFF.timestamp())
+        respx.get(
+            url__startswith=(
+                f"{LIVE_BASE}/series/KXHIGHNY/events/E1/forecast_percentile_history"
+            )
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "forecast_history": [
+                        {
+                            "end_period_ts": ts,
+                            "percentile_points": [
+                                {
+                                    "percentile": 10.0,
+                                    "numerical_forecast": 87_600_000,
+                                    "raw_numerical_forecast": 87_578_400,
+                                },
+                                {
+                                    "percentile": 90.0,
+                                    "numerical_forecast": 88_200_000,
+                                    "raw_numerical_forecast": 88_205_600,
+                                },
+                            ],
+                        }
+                    ]
+                },
+            )
+        )
+        with make_client() as c:
+            df = forecast_percentile_frame(
+                c, "E1", "KXHIGHNY",
+                start=CUTOFF - timedelta(hours=1), end=CUTOFF,
+            )
+        assert df["numerical_forecast"].to_list() == [87.5784, 88.2056]
+
+    @respx.mock
     def test_fee_changes_frame_new_path_and_key(self) -> None:
         ts = int(CUTOFF.timestamp())
         respx.get(url__startswith=f"{LIVE_BASE}/series/fee_changes").mock(
