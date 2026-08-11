@@ -1,0 +1,337 @@
+"""weadge CLI.
+
+    weadge kalshi sync-series KXHIGHNY
+    weadge kalshi backfill KXHIGHNY
+    weadge kalshi audit KXHIGHNY
+    weadge dataset build --series KXHIGHNY --snapshot 12h,6h,3h,1h
+    weadge research compare --series KXHIGHNY
+    weadge research incremental --series KXHIGHNY
+    weadge research latency --series KXHIGHNY
+    weadge research walk-forward --series KXHIGHNY
+    weadge backtest taker --series KXHIGHNY --model p_nbm --edge 0.06
+
+v0 commands that need downloaded data raise a clear error when the lake is
+empty — the pipeline order (data -> settlement -> dataset -> research) is
+enforced by the gates, not by the CLI.
+"""
+
+from __future__ import annotations
+
+from typing import Annotated
+
+import polars as pl
+import typer
+from rich.console import Console
+
+from weadge.config import data_root, load_cities, load_research
+from weadge.storage.parquet import DataLake
+
+app = typer.Typer(help="weadge — weather prediction-market alpha research engine", no_args_is_help=True)
+console = Console()
+
+_series_arg = Annotated[str, typer.Argument(help="Kalshi series ticker, e.g. KXHIGHNY")]
+_series_opt = Annotated[str, typer.Option("--series", help="Kalshi series ticker, e.g. KXHIGHNY")]
+
+
+def _lake() -> DataLake:
+    return DataLake(data_root())
+
+
+def _require(table: str, layer: str = "bronze") -> None:
+    if not _lake().exists(table, layer):
+        raise SystemExit(
+            f"table {layer}/{table} is empty — run the data pipeline first "
+            f"(weadge kalshi backfill ...)"
+        )
+
+
+# ------------------------------------------------------------------- kalshi
+kalshi_app = typer.Typer(help="Kalshi data pipeline.", no_args_is_help=True)
+app.add_typer(kalshi_app, name="kalshi")
+
+
+@kalshi_app.command("sync-series")
+def sync_series(series: _series_arg) -> None:
+    """Fetch series metadata (settlement_source, fee_type, fee_multiplier)."""
+    from weadge.adapters.kalshi.client import KalshiClient
+    from weadge.adapters.kalshi.markets import series_frame
+
+    with KalshiClient() as client:
+        frame = series_frame(client, series, save_raw=True)
+    _lake().write_parquet("series", frame, layer="bronze")
+    console.print(f"[green]series {series} synced[/green]")
+
+
+@kalshi_app.command("backfill")
+def backfill(series: _series_arg, start: str | None = None, end: str | None = None) -> None:
+    """Backfill events, markets, candles, forecast history, and fee changes.
+
+    start/end are ISO dates (YYYY-MM-DD). Without them, the adapter pulls
+    from the earliest available history to today, routing live vs historical
+    automatically by the /historical/cutoff endpoint.
+    """
+    from weadge.adapters.kalshi.client import KalshiClient
+    from weadge.domain.time import parse_iso
+
+    start_dt = parse_iso(start + "T00:00:00Z") if start else None
+    end_dt = parse_iso(end + "T00:00:00Z") if end else None
+
+    with KalshiClient() as client:
+        client._lake = _lake()  # type: ignore[attr-defined]  # raw capture hook
+        from weadge.adapters.kalshi.candles import candles_frame
+        from weadge.adapters.kalshi.fees import fee_changes_frame
+        from weadge.adapters.kalshi.forecasts import forecast_percentile_frame
+        from weadge.adapters.kalshi.markets import events_frame, markets_frame
+
+        lake = _lake()
+        console.print(f"[cyan]backfilling {series}...[/cyan]")
+        events = events_frame(client, series, start=start_dt, end=end_dt, save_raw=True)
+        lake.write_parquet("events", events, layer="bronze", partition_by="series_ticker")
+        console.print(f"  events: {events.height}")
+
+        markets = markets_frame(client, series_ticker=series, start=start_dt, end=end_dt, save_raw=True)
+        lake.write_parquet("markets", markets, layer="bronze", partition_by="series_ticker")
+        console.print(f"  markets: {markets.height}")
+
+        for ev in events.iter_rows(named=True):
+            ev_ticker = ev["event_ticker"]
+            ev_markets = markets.filter(pl_col_market_event(ev_ticker))
+            for m in ev_markets.iter_rows(named=True):
+                close_at = m["close_at"]
+                if close_at is None:
+                    continue
+                open_at = m["open_at"]
+                candle_start = open_at if open_at is not None else start_dt
+                if candle_start is None:
+                    continue
+                candles = candles_frame(
+                    client, m["market_ticker"],
+                    start=candle_start,
+                    end=close_at,
+                    save_raw=True,
+                )
+                lake.write_parquet("quote_1m", candles, layer="bronze",
+                                   partition_by="market_ticker")
+            pcts = forecast_percentile_frame(client, ev_ticker, series, save_raw=True)
+            lake.write_parquet("forecast_percentiles", pcts, layer="bronze",
+                               partition_by="event_ticker")
+            console.print(f"  {ev_ticker}: {len(ev_markets)} markets, {pcts.height} pct rows")
+
+        fees = fee_changes_frame(client, series, save_raw=True)
+        lake.write_parquet("fee_changes", fees, layer="bronze", partition_by="series_ticker")
+        console.print(f"  fee changes: {fees.height}")
+    console.print("[green]backfill done[/green]")
+
+
+def pl_col_market_event(event_ticker: str):
+    """Return a polars expression filtering markets by event ticker."""
+    return pl.col("event_ticker") == event_ticker
+
+
+@kalshi_app.command("audit")
+def audit(series: _series_arg) -> None:
+    """Settlement audit: Kalshi result vs official observation.
+
+    Research is FROZEN while mismatch > 0. This command is the G0 gate.
+    """
+    from weadge.dataset.settlement import SettlementOracle, SettlementSpec
+
+    _require("events")
+    _require("markets")
+    _require("observations")
+    city = load_cities().by_series(series)
+    spec = SettlementSpec(
+        series=series,
+        location=city.location,
+        station_id=city.station_id,
+        timezone=city.timezone,
+        source=city.settlement.source,
+        day_window=city.settlement.day_window,  # type: ignore[arg-type]
+        rounding=city.settlement.rounding,
+    )
+    lake = _lake()
+    report = SettlementOracle(
+        spec,
+        events=lake.read("events").filter(pl_col("series_ticker") == series),
+        markets=lake.read("markets").filter(pl_col("series_ticker") == series),
+        observations=lake.read("observations"),
+    ).audit()
+    console.print(report)
+    if not report.clean:
+        raise SystemExit("settlement audit FAILED — fix data before research")
+    console.print("[green]settlement audit passed (G0)[/green]")
+
+
+# ------------------------------------------------------------------ dataset
+dataset_app = typer.Typer(help="Alpha dataset construction.", no_args_is_help=True)
+app.add_typer(dataset_app, name="dataset")
+
+
+@dataset_app.command("build")
+def dataset_build(
+    series: _series_opt,
+    snapshot: Annotated[str, typer.Option("--snapshot", help="comma-separated lead hours, e.g. 12h,6h,3h,1h")] = "24h,12h,6h,3h,1h",
+) -> None:
+    """Build gold/alpha_dataset.parquet for a series."""
+    _require("events")
+    _require("markets")
+    _require("quote_1m")
+    leads = [int(x.strip().rstrip("h")) for x in snapshot.split(",") if x.strip()]
+    from weadge.dataset.builder import build_from_lake
+
+    cfg = load_research()
+    df = build_from_lake(
+        _lake(), series, snapshots_lead_hours=tuple(leads),
+        fallback_fee_multiplier=cfg.fees.get("fallback_fee_multiplier"),
+    )
+    path = _lake().gold_path()
+    df.write_parquet(path, compression="zstd")
+    console.print(f"[green]alpha dataset: {df.height} rows -> {path}[/green]")
+
+
+# ---------------------------------------------------------------- research
+research_app = typer.Typer(help="Forecast research (calibration, incremental alpha, latency).", no_args_is_help=True)
+app.add_typer(research_app, name="research")
+
+
+@research_app.command("compare")
+def research_compare(series: _series_opt) -> None:
+    """Brier / LogLoss table: Market vs KalshiForecast vs NBM."""
+    from weadge.research.scoring import score_frame
+
+    df = _load_gold(series)
+    table = score_frame(df, ["p_market", "p_kalshi_forecast", "p_nbm"])
+    console.print(table)
+
+
+@research_app.command("calibration")
+def research_calibration(series: _series_opt) -> None:
+    """Reliability index per model."""
+    from weadge.research.calibration import calibration_table
+
+    df = _load_gold(series)
+    console.print(calibration_table(df, ["p_market", "p_kalshi_forecast", "p_nbm"]))
+
+
+@research_app.command("incremental")
+def research_incremental(series: _series_opt) -> None:
+    """Alpha existence test: does weather add to market OOS (M0/M1/M2)?"""
+    from weadge.research.edge import fit_incremental
+    from weadge.research.walk_forward import split_frame
+
+    df = _load_gold(series)
+    dates = sorted(df["event_date"].unique().to_list())
+    windows: list[list] = []
+    for i in range(len(dates) - 3):
+        train_start, test_start = dates[i], dates[i + 3]
+        train, test = split_frame(df, train_start, test_start)
+        if test.is_empty():
+            continue
+        windows.append(fit_incremental(train, test))
+
+    def _ll(results: list) -> float:
+        return next(r.test_log_loss for r in results if r.model == "M2")
+
+    m0_win = sum(1 for w in windows if _ll(w) < next(r.test_log_loss for r in w if r.model == "M0"))
+    for r in windows[-1]:
+        console.print(r)
+    console.print(f"M2 beats M0 on OOS log loss in {m0_win}/{len(windows)} windows")
+
+
+@research_app.command("latency")
+def research_latency(series: _series_opt) -> None:
+    """Edge decay across +1/+2/+5/+10 minute execution delays."""
+    from weadge.research.latency import delayed_execution_edges, edge_by_delay_summary
+
+    df = _load_gold(series)
+    signals = df.rename({"p_nbm": "p_model"}).select(
+        ["market_ticker", "decision_at", "p_model"]
+    ).drop_nulls()
+    quotes = _lake().read("quote_1m")
+    delayed = delayed_execution_edges(signals, quotes)
+    console.print(edge_by_delay_summary(delayed))
+
+
+@research_app.command("walk-forward")
+def research_walk_forward(series: _series_opt) -> None:
+    """Chronological walk-forward: log loss of M0 vs M2 per expanding window."""
+    from weadge.research.edge import fit_incremental
+    from weadge.research.walk_forward import split_frame
+
+    df = _load_gold(series)
+    dates = sorted(df["event_date"].unique().to_list())
+    for i in range(0, len(dates) - 3):
+        train_start, test_start = dates[i], dates[i + 3]
+        train, test = split_frame(df, train_start, test_start)
+        if test.is_empty():
+            continue
+        for r in fit_incremental(train, test):
+            console.print(f"{test_start.date()} M{r.model[1]}: ll={r.test_log_loss:.4f} brier={r.test_brier:.4f}")
+
+
+# ---------------------------------------------------------------- backtest
+backtest_app = typer.Typer(help="Taker backtest.", no_args_is_help=True)
+app.add_typer(backtest_app, name="backtest")
+
+
+@backtest_app.command("taker")
+def backtest_taker(
+    series: _series_opt,
+    model: Annotated[str, typer.Option("--model", help="p_nbm | p_market | p_kalshi_forecast")] = "p_nbm",
+    edge: Annotated[float, typer.Option("--edge", help="minimum pre-fee edge")] = 0.06,
+) -> None:
+    """Taker backtest: BUY YES if p_model - ask >= edge; delayed fills; fee replay."""
+    from weadge.backtest.engine import run_taker_backtest
+    from weadge.backtest.fees import series_fee_schedule
+
+    df = _load_gold(series)
+    if model not in df.columns:
+        raise SystemExit(f"model column {model} not in gold dataset")
+    signals = df.rename({model: "p_model"}).select(
+        ["market_ticker", "decision_at", "p_model", "result"]
+    ).drop_nulls()
+    quotes = _lake().read("quote_1m")
+    fee_schedule = series_fee_schedule(
+        {"fee_multiplier": 0.07}, _lake().read("fee_changes")
+    )
+    report = run_taker_backtest(
+        signals, quotes, fee_schedule, threshold=edge, delay_min=1
+    )
+    console.print(report.as_text())
+    console.print("\n[bold]Edge calibration (predicted -> realized)[/bold]")
+    console.print(report.edge_bins)
+
+
+# ---------------------------------------------------------------- live
+live_app = typer.Typer(help="Live recording (v2).", no_args_is_help=True)
+app.add_typer(live_app, name="live")
+
+
+@live_app.command("record")
+def live_record(series: _series_opt) -> None:
+    """Start the real-time recorder (v2 — not available in v0)."""
+    import asyncio
+
+    from weadge.adapters.kalshi.websocket import KalshiWebSocket
+
+    ws = KalshiWebSocket()
+    try:
+        asyncio.run(ws.connect(series))
+    except NotImplementedError as exc:
+        raise SystemExit(str(exc)) from None
+
+
+def _load_gold(series: str) -> pl.DataFrame:
+    _require("quote_1m")
+    path = _lake().gold_path()
+    if not path.exists():
+        raise SystemExit("gold dataset missing — run: weadge dataset build")
+    return pl.read_parquet(path).filter(pl.col("city") == series)
+
+
+def pl_col(name: str):
+    return pl.col(name)
+
+
+if __name__ == "__main__":
+    app()
