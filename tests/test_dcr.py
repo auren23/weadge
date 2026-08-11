@@ -138,11 +138,12 @@ class TestBackfillSummary:
     def test_summary_counts(self, tmp_path) -> None:
         """End-to-end against a fake IEM: 2 products (1 prelim, 1 final)
         -> final selection yields 1 report day with a parsed maximum."""
-        import polars as pl
         import httpx
+        import polars as pl
         import respx
 
         from weadge.adapters.noaa.dcr import IEMClient
+        from weadge.storage.parquet import DataLake
 
         final_text = (FIXTURES / "CLINYC_final_202607010620.txt").read_text()
         prelim_text = (FIXTURES / "CLINYC_prelim_202607012036.txt").read_text()
@@ -150,8 +151,6 @@ class TestBackfillSummary:
             f'<a href="https://mesonet.agron.iastate.edu/p.php?pid={FINAL_PID}">f</a>'
             f'<a href="https://mesonet.agron.iastate.edu/p.php?pid={PRELIM_PID}">p</a>'
         )
-
-        from weadge.storage.parquet import DataLake
 
         with respx.mock:
             respx.get(url__startswith="https://mesonet.agron.iastate.edu/wx/afos/list.phtml").mock(
