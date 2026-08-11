@@ -16,10 +16,10 @@ from weadge.domain.time import ensure_utc
 
 class Observation(BaseModel):
     station_id: str
-    observed_at: datetime            # local "target date" boundary in UTC
+    observed_at: datetime            # instant within the report window, in UTC
     value: float                     # observed value in `unit`
     unit: str = "fahrenheit"
-    source: str = ""                 # e.g. "NWS ASOS"
+    source: str = ""                 # "NWS Daily Climate Report" (settlement truth) | "NWS ASOS" (METAR, research only)
 
     @field_validator("observed_at")
     @classmethod

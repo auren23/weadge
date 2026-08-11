@@ -220,7 +220,7 @@ def paired_incremental_gate(
 
     clusters = test[cluster_col].to_numpy()[keep_te]
     unique_clusters, inverse = np.unique(clusters, return_inverse=True)
-    n_clusters = int(len(unique_clusters))
+    n_clusters = len(unique_clusters)
     if n_clusters < 2:
         # a single cluster cannot support clustered inference — fail closed
         return IncrementalGateResult(mean_delta, float("nan"), float("nan"),

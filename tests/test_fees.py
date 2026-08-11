@@ -35,7 +35,9 @@ def _changes() -> list[tuple[datetime, str, float]]:
 class TestKalshiFormula:
     """Official fee-schedule golden values (taker, M=1, C=100)."""
 
-    GOLDEN = [(0.10, 0.63), (0.25, 1.32), (0.50, 1.75), (0.90, 0.63)]
+    GOLDEN: tuple[tuple[float, float], ...] = (
+        (0.10, 0.63), (0.25, 1.32), (0.50, 1.75), (0.90, 0.63),
+    )
 
     def test_official_golden_table(self) -> None:
         sched = FeeSchedule([(datetime(2026, 1, 1, 0, 0, tzinfo=UTC), "taker", 1.0)])

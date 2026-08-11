@@ -4,19 +4,33 @@ Priority above weather models: before ANY alpha research, weadge must prove it
 can reproduce Kalshi's settlement from official observations. The audit keeps
 BOTH the Kalshi result and the official observation, and reports any
 mismatch. Research is frozen while mismatch > 0.
+
+Settlement truth is the NWS Daily Climate Report (CLINYC for Central Park) —
+the final daily maximum Kalshi's weather markets settle on. Hourly METAR
+observations serve same-day research only and are NEVER accepted as
+settlement truth: the oracle ignores any observation whose `source` does not
+match the spec, so feeding METAR silently produces `missing` markets and
+freezes research instead of faking a settlement.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Literal
-from zoneinfo import ZoneInfo
 
 import polars as pl
 from pydantic import BaseModel
 
 from weadge.domain.time import ensure_utc
+
+# NWS Daily Climate Report day windows are midnight-to-midnight LOCAL
+# STANDARD time. In UTC the window for report date D is always
+# [D 05:00, D+1 05:00), summer or winter: during DST the report day runs
+# 01:00 EDT -> next 00:59 EDT, and a DST-aware local calendar day would
+# misplace the 00:00-01:00 EDT hour. Bucketing with a fixed UTC-5 offset
+# reproduces the report exactly.
+_EST_OFFSET_HOURS = 5
 
 
 class SettlementSpec(BaseModel):
@@ -26,12 +40,19 @@ class SettlementSpec(BaseModel):
     location: str = ""
     station_id: str = ""
     timezone: str = "America/New_York"
-    source: str = "NWS ASOS"
-    day_window: Literal["target_date"] = "target_date"
+    source: str = "NWS Daily Climate Report"  # the ONLY trusted settlement truth
+    day_window: Literal["local_standard"] = "local_standard"
     rounding: float = 0.5  # half-open buckets [floor, cap); strikes are integers
 
-    def local_date(self, dt_utc: datetime) -> date:
-        return ensure_utc(dt_utc).astimezone(ZoneInfo(self.timezone)).date()
+    def settlement_day(self, dt_utc: datetime) -> date:
+        """Report date owning an observation timestamp (local-standard window).
+
+        obs in [D 05:00 UTC, D+1 05:00 UTC) belongs to report date D,
+        which equals (obs - 5h) in UTC calendar days. During DST this maps
+        00:00-01:00 EDT to the PREVIOUS report day, matching the NWS
+        standard-time window that Kalshi settles on.
+        """
+        return (ensure_utc(dt_utc) - timedelta(hours=_EST_OFFSET_HOURS)).date()
 
 
 @dataclass(frozen=True)
@@ -94,16 +115,24 @@ class SettlementOracle:
         return out
 
     def _observation_map(self) -> dict[date, float]:
-        """local target date -> observed value (latest per date wins)."""
+        """report date -> observed value (latest per date wins).
+
+        ONLY rows whose `source` matches the spec count as settlement truth.
+        METAR or any other source is ignored: settlement can never be derived
+        from hourly observations (their daily max is not the report's daily
+        max, and their day window does not match the report's).
+        """
         out: dict[date, float] = {}
         for row in self.observations.iter_rows(named=True):
             if str(row.get("station_id", "")) != self.spec.station_id:
                 continue
+            if str(row.get("source", "")) != self.spec.source:
+                continue
             obs_at = row.get("observed_at")
             if obs_at is None:
                 continue
-            local = self.spec.local_date(obs_at)
-            out[local] = float(row["value"])
+            report_day = self.spec.settlement_day(obs_at)
+            out[report_day] = float(row["value"])
         return out
 
     def audit(self) -> AuditReport:

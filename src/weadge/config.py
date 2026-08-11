@@ -17,9 +17,12 @@ CONFIG_DIR = PROJECT_ROOT / "config"
 
 
 class SettlementConfig(BaseModel):
-    day_window: str = "target_date"
+    # day_window "local_standard": the NWS Daily Climate Report covers
+    # midnight-to-midnight local STANDARD time (01:00 EDT -> 00:59 EDT in
+    # DST), i.e. [05:00 UTC, 05:00 UTC) all year.
+    day_window: str = "local_standard"
     rounding: float = 0.5
-    source: str = "NWS ASOS"
+    source: str = "NWS Daily Climate Report"  # the ONLY settlement truth
 
 
 class CityConfig(BaseModel):

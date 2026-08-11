@@ -13,6 +13,6 @@ cities:
     target: "max_temperature"     # daily maximum temperature
     unit: "fahrenheit"
     settlement:
-      day_window: "target_date"
-      rounding: 0.5               # Kalshi buckets are 1F; strikes centered on integers
-      source: "NWS ASOS"          # official settlement source (from series metadata)
+      day_window: "local_standard"   # NWS DCR: midnight-to-midnight local STANDARD time
+      rounding: 0.5                  # Kalshi buckets are 1F; strikes centered on integers
+      source: "NWS Daily Climate Report"  # CLINYC final daily max = settlement truth
