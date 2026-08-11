@@ -27,6 +27,7 @@ dependencies = [
     "pyyaml>=6.0",
     "zstandard>=0.22",
     "cryptography>=42.0",  # Kalshi request signing (RSA-PSS) for authenticated endpoints
+    "pygrib>=2.1.8",
 ]
 
 [dependency-groups]
@@ -52,6 +53,9 @@ packages = ["src/weadge"]
 testpaths = ["tests"]
 addopts = "-q"
 asyncio_mode = "auto"
+markers = [
+    "network: tests that hit live external APIs (not run by default)",
+]
 
 [tool.ruff]
 target-version = "py312"
