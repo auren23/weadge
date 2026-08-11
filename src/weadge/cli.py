@@ -204,6 +204,47 @@ def dataset_build(
     console.print(f"[green]alpha dataset: {df.height} rows -> {path}[/green]")
 
 
+# ------------------------------------------------------------------- noaa
+noaa_app = typer.Typer(help="NOAA/NWS data pipeline (settlement truth).", no_args_is_help=True)
+app.add_typer(noaa_app, name="noaa")
+
+
+@noaa_app.command("backfill-dcr")
+def noaa_backfill_dcr(
+    series: _series_opt,
+    start: Annotated[str, typer.Option("--start", help="ISO date YYYY-MM-DD (inclusive)")],
+    end: Annotated[str, typer.Option("--end", help="ISO date YYYY-MM-DD (inclusive)")],
+) -> None:
+    """Backfill NWS Daily Climate Report (CLINYC) via the IEM text archive.
+
+    Settlement truth only: preliminary bulletins are rejected, the latest
+    complete daily per report date wins, and observations are written with
+    source='NWS Daily Climate Report' (IEM is just the transport).
+    """
+    from datetime import date
+
+    from weadge.adapters.noaa.dcr import backfill_dcr
+
+    city = load_cities().by_series(series)
+    station_id = city.station_id  # e.g. KNYC
+    pil = f"CLI{station_id[1:]}"  # KNYC -> CLINYC
+    start_d = date.fromisoformat(start)
+    end_d = date.fromisoformat(end)
+
+    lake = _lake()
+    summary = backfill_dcr(start_d, end_d, lake, pil=pil, station_id=station_id)
+
+    console.print(f"[cyan]{pil} DCR BACKFILL[/cyan]  {start} -> {end}")
+    console.print(f"products fetched      {summary['products_fetched']}")
+    console.print(f"preliminary rejected  {summary['preliminary_rejected']}")
+    console.print(f"complete daily        {summary['complete_daily']}")
+    console.print(f"corrections           {summary['corrections']}")
+    console.print(f"unique report days    {summary['unique_report_days']}")
+    console.print(f"parsed maximum        {summary['parsed_maximum']}")
+    console.print(f"missing maximum       {summary['missing_maximum']}")
+    console.print(f"foreign rejected      {summary['foreign_rejected']}")
+
+
 # ---------------------------------------------------------------- research
 research_app = typer.Typer(help="Forecast research (calibration, incremental alpha, latency).", no_args_is_help=True)
 app.add_typer(research_app, name="research")

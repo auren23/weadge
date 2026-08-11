@@ -42,7 +42,7 @@ class SettlementSpec(BaseModel):
     timezone: str = "America/New_York"
     source: str = "NWS Daily Climate Report"  # the ONLY trusted settlement truth
     day_window: Literal["local_standard"] = "local_standard"
-    rounding: float = 0.5  # half-open buckets [floor, cap); strikes are integers
+    rounding: float = 0.5  # Kalshi bucket edges; see bucket_hit for semantics
 
     def settlement_day(self, dt_utc: datetime) -> date:
         """Report date owning an observation timestamp (local-standard window).
@@ -78,10 +78,20 @@ class AuditReport:
 
 
 def bucket_hit(value: float, floor_strike: float | None, cap_strike: float | None) -> bool:
-    """Does `value` fall in the half-open bucket [floor, cap)?"""
-    if floor_strike is not None and value < floor_strike:
-        return False
-    return not (cap_strike is not None and value >= cap_strike)
+    """Does `value` fall in the bucket, per Kalshi's rules text?
+
+    Verified semantics from real KXHIGHNY rules (July 2026):
+      both strikes  -> "between X-Y°"  -> floor <= value <= cap   (CLOSED)
+      cap only      -> "less than X°"  -> value <  cap            (strict)
+      floor only    -> "greater than X°" -> value > floor         (strict)
+    """
+    if floor_strike is not None and cap_strike is not None:
+        return floor_strike <= value <= cap_strike
+    if cap_strike is not None:
+        return value < cap_strike
+    if floor_strike is not None:
+        return value > floor_strike
+    return True
 
 
 class SettlementOracle:

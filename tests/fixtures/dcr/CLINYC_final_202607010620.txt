@@ -1,0 +1,97 @@
+CDUS41 KOKX 010620
+CLINYC
+
+CLIMATE REPORT 
+NATIONAL WEATHER SERVICE NEW YORK, NY
+220 AM EDT WED JUL 01 2026
+
+...................................
+
+...THE CENTRAL PARK NY CLIMATE SUMMARY FOR JUNE 30 2026...
+
+CLIMATE NORMAL PERIOD 1991 TO 2020
+CLIMATE RECORD PERIOD 1869 TO 2026
+
+
+WEATHER ITEM   OBSERVED TIME   RECORD YEAR NORMAL DEPARTURE LAST      
+                VALUE   (LST)  VALUE       VALUE  FROM      YEAR     
+                                                  NORMAL           
+...................................................................
+TEMPERATURE (F)                                                          
+ YESTERDAY                                                           
+  MAXIMUM         87   1226 PM  99    1964  84      3       90       
+  MINIMUM         73    522 AM  53    1919  69      4       71       
+  AVERAGE         80                        76      4       81     
+
+PRECIPITATION (IN)                                                    
+  YESTERDAY        T             3.07 1984   0.13  -0.13      T       
+  MONTH TO DATE    3.39                      4.54  -1.15     2.46     
+  SINCE JUN 1      3.39                      4.54  -1.15     2.46     
+  SINCE JAN 1     17.82                     23.71  -5.89    21.02     
+
+SNOWFALL (IN)                                                              
+  YESTERDAY        0.0           0.0  2001   0.0    0.0      0.0      
+                                      2002                           
+  MONTH TO DATE    0.0                       0.0    0.0      0.0      
+  SINCE JUN 1      0.0                       0.0    0.0      0.0      
+  SINCE JUL 1     43.4                      29.8   13.6     12.9      
+  SNOW DEPTH       0                                                 
+
+DEGREE DAYS                                                           
+ HEATING                                                              
+  YESTERDAY        0                         0      0        0        
+  MONTH TO DATE    4                        12     -8       16        
+  SINCE JUN 1      4                        12     -8       16        
+  SINCE JUL 1   4748                      4550    198     4248        
+
+ COOLING                                                              
+  YESTERDAY       15                        11      4       16        
+  MONTH TO DATE  262                       226     36      272        
+  SINCE JUN 1    262                       226     36      272        
+  SINCE JAN 1    400                       307     93      329        
+...................................................................
+
+
+WIND (MPH)                                                            
+  HIGHEST WIND SPEED    14   HIGHEST WIND DIRECTION    SW (230)       
+  HIGHEST GUST SPEED    21   HIGHEST GUST DIRECTION    SW (230)       
+  AVERAGE WIND SPEED     6.0                                        
+
+
+SKY COVER                                                             
+  AVERAGE SKY COVER 0.1                                                 
+
+
+WEATHER CONDITIONS                                                    
+THE FOLLOWING WEATHER WAS RECORDED YESTERDAY.                         
+  NO SIGNIFICANT WEATHER WAS OBSERVED.                                  
+
+
+RELATIVE HUMIDITY (PERCENT)
+ HIGHEST    73           500 AM                                      
+ LOWEST     46           500 PM                                      
+ AVERAGE    60                                                        
+
+..........................................................
+
+
+THE CENTRAL PARK NY CLIMATE NORMALS FOR TODAY
+                         NORMAL    RECORD    YEAR                     
+ MAXIMUM TEMPERATURE (F)   84       100      1901                      
+ MINIMUM TEMPERATURE (F)   69        52      1943                      
+
+
+SUNRISE AND SUNSET                                                    
+JULY  1 2026..........SUNRISE   528 AM EDT   SUNSET   831 PM EDT     
+JULY  2 2026..........SUNRISE   529 AM EDT   SUNSET   831 PM EDT     
+
+
+-  INDICATES NEGATIVE NUMBERS.
+R  INDICATES RECORD WAS SET OR TIED.
+MM INDICATES DATA IS MISSING.
+T  INDICATES TRACE AMOUNT.
+
+
+
+
+$$

@@ -53,13 +53,39 @@ def _spec() -> SettlementSpec:
 
 
 class TestBucketHit:
-    def test_half_open_intervals(self) -> None:
-        assert bucket_hit(90.0, 90.0, 92.0)          # low inclusive
-        assert bucket_hit(91.999, 90.0, 92.0)
-        assert not bucket_hit(92.0, 90.0, 92.0)      # cap exclusive
-        assert not bucket_hit(89.999, 90.0, 92.0)
-        assert bucket_hit(93.0, 92.0, None)          # unbounded tail
-        assert not bucket_hit(91.0, 92.0, None)
+    def test_between_is_closed_interval(self) -> None:
+        """Kalshi rules say 'between X-Y°' — both edges are inclusive."""
+        assert bucket_hit(90.0, 90.0, 92.0)          # low edge included
+        assert bucket_hit(91.0, 90.0, 92.0)
+        assert bucket_hit(92.0, 90.0, 92.0)          # high edge included (was half-open)
+        assert not bucket_hit(89.0, 90.0, 92.0)
+        assert not bucket_hit(93.0, 90.0, 92.0)
+
+    def test_less_than_is_strict(self) -> None:
+        """T-bucket 'less than 92°': 92 itself is NOT in the bucket."""
+        assert bucket_hit(91.0, None, 92.0)
+        assert not bucket_hit(92.0, None, 92.0)
+        assert not bucket_hit(93.0, None, 92.0)
+
+    def test_greater_than_is_strict(self) -> None:
+        """T-bucket 'greater than 99°': 99 itself is NOT in the bucket."""
+        assert bucket_hit(100.0, 99.0, None)
+        assert not bucket_hit(99.0, 99.0, None)
+        assert not bucket_hit(98.0, 99.0, None)
+
+    def test_partition_is_exact(self) -> None:
+        """The KXHIGHNY ladder partitions all integers: T92 (<92), B92.5
+        {92,93}, B94.5 {94,95}, ..., T99 (>99)."""
+        for v in range(80, 105):
+            hits = [
+                bucket_hit(v, None, 92.0),
+                bucket_hit(v, 92.0, 93.0),
+                bucket_hit(v, 94.0, 95.0),
+                bucket_hit(v, 96.0, 97.0),
+                bucket_hit(v, 98.0, 99.0),
+                bucket_hit(v, 99.0, None),
+            ]
+            assert sum(hits) == 1, f"value {v} hits {sum(hits)} buckets"
 
 
 class TestSettlementDay:
