@@ -10,7 +10,7 @@ and testable: filter by availability, then take the latest row per key.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import polars as pl
 
@@ -48,9 +48,42 @@ def latest_quote_at_or_before(
     decision_at: datetime,
     quote_ts_col: str = "ts",
 ) -> pl.DataFrame:
-    """Last 1m quote at or before `decision_at` per market."""
+    """Last 1m quote at or before `decision_at` per market.
+
+    OPEN semantics: a bar's open is knowable at its start (ts), so this is
+    safe only for open prices. For closes use
+    latest_completed_quote_at_or_before.
+    """
     decision_at = _as_utc(decision_at)
     before = quotes.filter(pl.col(quote_ts_col) <= decision_at)
+    if before.is_empty():
+        return before
+    return (
+        before.sort(quote_ts_col, descending=True)
+        .unique(subset=["market_ticker"], keep="first")
+        .sort(quote_ts_col)
+    )
+
+
+def latest_completed_quote_at_or_before(
+    quotes: pl.DataFrame,
+    decision_at: datetime,
+    quote_ts_col: str = "ts",
+    bar_duration_s: int = 60,
+) -> pl.DataFrame:
+    """Last 1m quote whose bar is COMPLETE at `decision_at` (bar_end_at <= T).
+
+    A bar covering [12:05, 12:06) is not complete at 12:05:00 — its close
+    does not exist yet — so this returns the 12:04 bar. Uses bar_end_at when
+    present, else derives it as ts + bar_duration.
+    """
+    decision_at = _as_utc(decision_at)
+    if "bar_end_at" in quotes.columns:
+        before = quotes.filter(pl.col("bar_end_at") <= decision_at)
+    else:
+        before = quotes.filter(
+            pl.col(quote_ts_col) + timedelta(seconds=bar_duration_s) <= decision_at
+        )
     if before.is_empty():
         return before
     return (

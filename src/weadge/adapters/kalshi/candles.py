@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import polars as pl
@@ -46,10 +46,13 @@ def candles_frame(
     for c in raw_rows:
         bid_open, bid_high, bid_low, bid_close = _ohlc(c, "bid")
         ask_open, ask_high, ask_low, ask_close = _ohlc(c, "ask")
+        start = from_timestamp(int(c["start_ts"]))
         rows.append(
             {
                 "market_ticker": market_ticker,
-                "ts": from_timestamp(int(c["start_ts"])),
+                "ts": start,
+                "bar_start_at": start,
+                "bar_end_at": start + timedelta(minutes=1),
                 "yes_bid_open": bid_open,
                 "yes_bid_high": bid_high,
                 "yes_bid_low": bid_low,

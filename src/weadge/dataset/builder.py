@@ -13,7 +13,7 @@ from datetime import datetime
 import polars as pl
 
 from weadge.backtest.fees import FeeSchedule, series_fee_schedule
-from weadge.dataset.alignment import latest_quote_at_or_before
+from weadge.dataset.alignment import latest_completed_quote_at_or_before
 from weadge.dataset.probability import (
     kalshi_forecast_probability,
     market_probability_from_quote,
@@ -118,7 +118,7 @@ class AlphaDatasetBuilder:
         high: float | None,
         quotes: pl.DataFrame,
     ) -> dict | None:
-        quote = latest_quote_at_or_before(quotes, decision_at).filter(
+        quote = latest_completed_quote_at_or_before(quotes, decision_at).filter(
             pl.col("market_ticker") == market["market_ticker"]
         )
         if quote.is_empty():

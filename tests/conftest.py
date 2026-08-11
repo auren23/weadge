@@ -29,6 +29,8 @@ def make_quotes(market_ticker: str, start: datetime, n: int, *, step_min: int = 
             {
                 "market_ticker": market_ticker,
                 "ts": ts,
+                "bar_start_at": ts,
+                "bar_end_at": ts + timedelta(minutes=step_min),
                 "yes_bid_open": bid_base + drift,
                 "yes_bid_high": bid_base + drift + 0.01,
                 "yes_bid_low": bid_base + drift - 0.01,

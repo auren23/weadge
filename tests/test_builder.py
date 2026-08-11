@@ -130,9 +130,11 @@ class TestAlphaDataset:
         row = df.filter(pl.col("market_ticker") == f"{EVENT}-M3").filter(
             pl.col("lead_hours") == 24.0
         ).row(0, named=True)
-        # at close-24h the quote drift = i/n with i = (close-24h - start)/1min
+        # at close-24h the latest COMPLETED bar is close-24h-1m (a bar whose
+        # ts == decision_at is still open and its close is not knowable)
         start = shift(CLOSE, hours=-26)
-        i = int((shift(CLOSE, hours=-24) - start).total_seconds() // 60)
+        completed = shift(CLOSE, hours=-24, minutes=-1)
+        i = int((completed - start).total_seconds() // 60)
         drift = i / (26 * 60) * 0.1
         expected_mid = (0.70 + drift + 0.75 + drift) / 2.0
         assert row["market_mid"] == pytest.approx(expected_mid, abs=1e-9)

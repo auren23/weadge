@@ -49,10 +49,16 @@ MARKET_SCHEMA: Schema = {
     "ingested_at": pl.Datetime("us", time_zone="UTC"),
 }
 
-# quote_1m: 1-minute YES bid/ask OHLC candlesticks
+# quote_1m: 1-minute YES bid/ask OHLC candlesticks.
+# ts is the bar's START timestamp (Kalshi candle start_ts). bar_start_at is
+# the same instant spelled out; bar_end_at = bar_start_at + interval marks
+# when the bar COMPLETES. A bar's close is knowable only once bar_end_at <= T;
+# its open is knowable once bar_start_at <= T.
 QUOTE_1M_SCHEMA: Schema = {
     "market_ticker": pl.Utf8,
     "ts": pl.Datetime("us", time_zone="UTC"),
+    "bar_start_at": pl.Datetime("us", time_zone="UTC"),
+    "bar_end_at": pl.Datetime("us", time_zone="UTC"),
     "yes_bid_open": pl.Float64,
     "yes_bid_high": pl.Float64,
     "yes_bid_low": pl.Float64,

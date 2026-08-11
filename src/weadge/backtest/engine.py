@@ -13,7 +13,7 @@ Every trade pays the fee that was actually in effect at execution time
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import numpy as np
 import polars as pl
@@ -75,17 +75,24 @@ def run_taker_backtest(
     result_col: str = "result",
     signal_ts_col: str = "decision_at",
     market_col: str = "market_ticker",
-    ask_col: str = "yes_ask_open",
+    ask_col: str = "yes_ask_close",
 ) -> BacktestReport:
     """Run the v0 taker strategy and return a report.
 
     `signals` rows must carry p_model, result (0/1) and decision_at.
-    The ask used for the threshold decision is the ask CLOSE of the signal bar
-    (most conservative knowable quote); the fill is the ask OPEN one bar later.
+
+    Candle availability: the ask used for the threshold decision is the ask
+    CLOSE of the last COMPLETED bar at or before decision_at
+    (bar_end_at <= decision_at) — a bar's close is not knowable until the
+    bar has ended. The fill is the ask OPEN of the first bar starting at or
+    after decision_at + delay (default +1 minute), i.e. the next bar's open
+    after the signal. This deliberately trades one minute slower than the
+    theoretical earliest fill; honesty beats hypothetical latency edge.
     """
     if signals.is_empty():
         return _empty_report(signals)
 
+    quotes = _ensure_bar_bounds(quotes)
     trades: list[TradeRecord] = []
     candidates = 0
     for sig in signals.iter_rows(named=True):
@@ -95,8 +102,8 @@ def run_taker_backtest(
         result = int(sig[result_col])
         candidates += 1
 
-        # find the signal-bar ask close (last quote at or before signal_ts)
-        ask_signal = _ask_close_at(quotes, mk, sig_ts, ask_col)
+        # gate ask: last COMPLETED bar's ask close (bar_end_at <= decision_at)
+        ask_signal = _ask_at_completed_bar(quotes, mk, sig_ts, ask_col)
         if ask_signal is None or np.isnan(ask_signal):
             continue
         gross = p_model - ask_signal
@@ -169,7 +176,7 @@ def run_taker_backtest(
 
 
 def _add_slippage(df: pl.DataFrame, trades: list[TradeRecord]) -> pl.DataFrame:
-    """Attach slippage = fill_price - signal-bar ask_close (the gate ask)."""
+    """Attach slippage = fill_price - gate ask (last completed bar's ask close)."""
     gross = df["gross_edge"].to_list()
     # signal-bar ask = p_model - gross_edge
     p_model = df["p_model"].to_list()
@@ -182,16 +189,34 @@ def _add_slippage(df: pl.DataFrame, trades: list[TradeRecord]) -> pl.DataFrame:
     return df.with_columns(pl.Series("slippage", slippage, dtype=pl.Float64))
 
 
-def _ask_close_at(
+def _ensure_bar_bounds(quotes: pl.DataFrame) -> pl.DataFrame:
+    """Attach bar_start_at / bar_end_at, deriving them from ts when absent
+    (legacy frames predating the columns): ts is the bar start, a 1m bar
+    completes one minute later."""
+    if "bar_end_at" in quotes.columns:
+        return quotes
+    return quotes.with_columns(
+        pl.col("ts").alias("bar_start_at"),
+        (pl.col("ts") + timedelta(minutes=1)).alias("bar_end_at"),
+    )
+
+
+def _ask_at_completed_bar(
     quotes: pl.DataFrame,
     market_ticker: str,
     ts: datetime,
     ask_col: str,
 ) -> float | None:
+    """Ask of the last COMPLETED bar at or before `ts` (bar_end_at <= ts).
+
+    A bar's close only exists once the bar has ended: with decision at
+    12:05:00, the 12:05 bar (covering 12:05-12:06) is NOT complete, so the
+    gate is the 12:04 bar's close.
+    """
     before = (
         quotes.filter(pl.col("market_ticker") == market_ticker)
-        .filter(pl.col("ts") <= ts)
-        .sort("ts")
+        .filter(pl.col("bar_end_at") <= ts)
+        .sort("bar_end_at")
     )
     if before.is_empty():
         return None
