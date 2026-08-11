@@ -99,7 +99,7 @@ def _forecasts() -> pl.DataFrame:
 
 @pytest.fixture
 def builder() -> AlphaDatasetBuilder:
-    fee = FeeSchedule([(datetime(2026, 6, 1, 0, 0, tzinfo=UTC), 0.07)])
+    fee = FeeSchedule([(datetime(2026, 6, 1, 0, 0, tzinfo=UTC), "taker", 1.0)])
     return AlphaDatasetBuilder(
         events=_events(),
         markets=_markets(),
@@ -157,11 +157,16 @@ class TestAlphaDataset:
         assert late_row["p_nbm"] > early_row["p_nbm"] + 0.1
 
     def test_fee_from_schedule_at_decision_time(self, builder) -> None:
+        """Fee = round_up_to_cent(M * 0.07 * P * (1-P)), NOT price * M."""
+        from weadge.backtest.fees import round_up_to_cent
+
         df = builder.build()
         row = df.filter(pl.col("market_ticker") == f"{EVENT}-M2").filter(
             pl.col("lead_hours") == 3.0
         ).row(0, named=True)
-        assert row["fee"] == pytest.approx(row["market_ask"] * 0.07, abs=1e-9)
+        expected = round_up_to_cent(0.07 * row["market_ask"] * (1 - row["market_ask"]))
+        assert row["fee"] == pytest.approx(expected, abs=1e-9)
+        assert row["fee"] < row["market_ask"] * 0.07  # P(1-P) shrinks the old price*M fee
 
     def test_spread(self, builder) -> None:
         df = builder.build()

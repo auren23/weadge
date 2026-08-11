@@ -151,16 +151,22 @@ def build_from_lake(
     series_ticker: str,
     snapshots_lead_hours: list[int] | tuple[int, ...] = (24, 12, 6, 3, 1),
     *,
-    fallback_fee_multiplier: float | None = 0.07,
+    fallback_fee_multiplier: float | None = 1.0,
+    fallback_fee_type: str = "taker",
 ) -> pl.DataFrame:
-    """Read bronze tables from the lake and build the gold dataset."""
+    """Read bronze tables from the lake and build the gold dataset.
+
+    `fallback_fee_multiplier` is the API multiplier M (usually 1.0), NOT a
+    base rate: the formula is fee = M * base_rate * C * P * (1 - P).
+    """
     events = lake.read("events").filter(pl.col("series_ticker") == series_ticker)
     markets = lake.read("markets").filter(pl.col("series_ticker") == series_ticker)
     quotes = lake.read("quote_1m")
     pcts = lake.read("forecast_percentiles")
     forecasts = lake.read("forecasts").filter(pl.col("location_id") == series_ticker)
     fee_schedule = series_fee_schedule(
-        {"fee_multiplier": fallback_fee_multiplier}, lake.read("fee_changes")
+        {"fee_multiplier": fallback_fee_multiplier, "fee_type": fallback_fee_type},
+        lake.read("fee_changes"),
     )
     builder = AlphaDatasetBuilder(
         events=events,

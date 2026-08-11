@@ -292,7 +292,7 @@ def backtest_taker(
     ).drop_nulls()
     quotes = _lake().read("quote_1m")
     fee_schedule = series_fee_schedule(
-        {"fee_multiplier": 0.07}, _lake().read("fee_changes")
+        {"fee_multiplier": 1.0, "fee_type": "taker"}, _lake().read("fee_changes")
     )
     report = run_taker_backtest(
         signals, quotes, fee_schedule, threshold=edge, delay_min=1
