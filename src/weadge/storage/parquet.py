@@ -87,6 +87,23 @@ class DataLake:
             return canon.empty_frame(table)
         return pl.concat([pl.read_parquet(f) for f in files], how="vertical_relaxed")
 
+    def delete_partition(self, table: str, layer: str = "bronze", **filters: str) -> None:
+        """Remove one hive partition dir, e.g. location_id=KXHIGHNY.
+
+        Used to make a full re-backfill idempotent: the partition is
+        rewritten from scratch while every other partition is untouched.
+        """
+        root = self.root / layer / table
+        if not root.exists():
+            return
+        for key, value in filters.items():
+            target = root / f"{key}={value}"
+            if not target.exists():
+                continue
+            for f in target.glob("*.parquet"):
+                f.unlink()
+            target.rmdir()
+
     def exists(self, table: str, layer: str = "bronze") -> bool:
         root = self.root / layer / table
         return root.exists() and any(root.rglob("*.parquet"))

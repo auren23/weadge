@@ -245,6 +245,78 @@ def noaa_backfill_dcr(
     console.print(f"foreign rejected      {summary['foreign_rejected']}")
 
 
+@noaa_app.command("backfill-nbm")
+def noaa_backfill_nbm(
+    series: _series_opt,
+    start: Annotated[str, typer.Option("--start", help="ISO date YYYY-MM-DD (inclusive)")],
+    end: Annotated[str, typer.Option("--end", help="ISO date YYYY-MM-DD (inclusive)")],
+) -> None:
+    """Backfill NBM MaxT QMD distributions (AWS archive) for each target date.
+
+    Per target date D: the D-00Z run's f030 (day-1, window [D 12Z, D+1 06Z))
+    and the (D-1)-00Z run's f054 (day-2 — the SAME window, knowable 24h
+    earlier, which is what makes the T-24h snapshot covered). availability
+    = observed S3 Last-Modified. The NBM window differs from the DCR
+    settlement day — recorded, not aligned.
+    """
+    from datetime import date
+
+    from weadge.adapters.noaa.nbm import backfill_nbm
+
+    city = load_cities().by_series(series)
+    start_d = date.fromisoformat(start)
+    end_d = date.fromisoformat(end)
+    summary = backfill_nbm(
+        start_d, end_d, _lake(),
+        series=series, station_id=city.station_id,
+        lat=city.lat, lon=city.lon,
+    )
+    console.print(f"[cyan]NBM MaxT QMD BACKFILL[/cyan]  {start} -> {end}")
+    console.print(f"days requested       {summary['days_requested']}")
+    console.print(f"f030 (day-1) fetched {summary['f030_fetched']}  missing {summary['f030_missing']}")
+    console.print(f"f054 (day-2) fetched {summary['f054_fetched']}  missing {summary['f054_missing']}")
+    console.print(f"model v5.0.x         {summary['v5_0_x']} runs")
+    console.print(f"model v5.0.14        {summary['v5_0_14']} runs")
+
+
+@noaa_app.command("audit-nbm")
+def noaa_audit_nbm(series: _series_opt) -> None:
+    """NBM smoke audit: snapshot coverage, distribution, ordering, as-of."""
+    from weadge.adapters.noaa.nbm import nbm_smoke_audit
+
+    _require("events")
+    _require("markets")
+    _require("forecasts")
+    lake = _lake()
+    a = nbm_smoke_audit(
+        lake.read("events").filter(pl.col("series_ticker") == series),
+        lake.read("markets").filter(pl.col("series_ticker") == series),
+        lake.read("forecasts"),
+        series=series,
+    )
+    console.print("[cyan]NBM SMOKE AUDIT[/cyan]")
+    console.print(f"events                          {a['events']}")
+    console.print(f"events with >=1 NBM forecast    {a['events_with_forecast']}")
+    console.print("snapshot coverage (day-D MaxT window available)")
+    for h, n in a["coverage"].items():
+        console.print(f"  T-{h:>2}h                         {n}/{a['events']}")
+    console.print("distribution (of forecast rows)")
+    console.print(f"  mean present                   {a['pct_mean']:.0f}%")
+    console.print(f"  std present                    {a['pct_std']:.0f}%")
+    console.print(f"  p10..p90 present               {a['pct_p']:.0f}%")
+    console.print(f"ordering violations              {a['ordering_violations']}")
+    console.print(f"as-of violations                 {a['asof_violations']}")
+    console.print(f"wrong target-window              {a['wrong_target_window']}")
+    console.print(a["window_note"])
+    console.print("NBM version distribution (rows / runs)")
+    for v in a["versions"]:
+        runs = next(
+            (r["len"] for r in a["version_runs"] if r["model_version"] == v["model_version"]),
+            0,
+        )
+        console.print(f"  {v['model_version']:<14} {v['len']:3d} rows  {runs:2d} runs")
+
+
 # ---------------------------------------------------------------- research
 research_app = typer.Typer(help="Forecast research (calibration, incremental alpha, latency).", no_args_is_help=True)
 app.add_typer(research_app, name="research")
