@@ -1,0 +1,174 @@
+"""Alpha dataset builder: bronze tables -> gold/alpha_dataset.parquet.
+
+Each row is one (event, market, snapshot): a fixed lead-time decision point,
+never every minute. This is the statistical guardrail — minute-level rows for
+the same event are not independent samples, and the dataset must not pretend
+otherwise.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+
+import polars as pl
+
+from weadge.backtest.fees import FeeSchedule, series_fee_schedule
+from weadge.dataset.alignment import latest_quote_at_or_before
+from weadge.dataset.probability import (
+    kalshi_forecast_probability,
+    market_probability_from_quote,
+    nbm_bucket_probability,
+)
+from weadge.domain.time import ensure_utc, shift
+from weadge.storage.parquet import DataLake
+from weadge.storage.schema import ALPHA_DATASET_SCHEMA, empty_frame
+
+
+class AlphaDatasetBuilder:
+    """Assemble the research dataset from bronze/silver frames.
+
+    Frames may be passed in directly (tests) or read from the lake (CLI).
+    """
+
+    def __init__(
+        self,
+        events: pl.DataFrame,
+        markets: pl.DataFrame,
+        quotes: pl.DataFrame,
+        forecast_percentiles: pl.DataFrame,
+        forecasts: pl.DataFrame,
+        fee_schedule: FeeSchedule,
+        snapshots_lead_hours: list[int] | tuple[int, ...] = (24, 12, 6, 3, 1),
+    ) -> None:
+        self.events = events
+        self.markets = markets
+        self.quotes = quotes
+        self.forecast_percentiles = forecast_percentiles
+        self.forecasts = forecasts
+        self.fee_schedule = fee_schedule
+        self.snapshots = sorted(snapshots_lead_hours)
+
+    # ---------------------------------------------------------------- build
+    def build(self) -> pl.DataFrame:
+        ev_map = {
+            str(r["event_ticker"]): r for r in self.events.iter_rows(named=True)
+        }
+        event_dates = {t: r.get("target_date") for t, r in ev_map.items()}
+
+        # pre-compute mid per quote row
+        quotes = self.quotes.with_columns(
+            ((pl.col("yes_bid_close") + pl.col("yes_ask_close")) / 2.0).alias("mid_close")
+        )
+
+        rows: list[dict] = []
+        for m in self.markets.iter_rows(named=True):
+            ev = str(m["event_ticker"])
+            close_at = m.get("close_at")
+            target = event_dates.get(ev)
+            if close_at is None or target is None:
+                continue
+            close_at = ensure_utc(close_at)
+            low = m.get("floor_strike")
+            high = m.get("cap_strike")
+            for lead_h in self.snapshots:
+                decision_at = shift(close_at, hours=-lead_h)
+                row = self._build_row(
+                    m, ev, target, close_at, decision_at, lead_h, low, high, quotes
+                )
+                if row is not None:
+                    rows.append(row)
+
+        if not rows:
+            return empty_frame("alpha_dataset")
+        df = pl.DataFrame(rows, schema=ALPHA_DATASET_SCHEMA)
+        return df.sort(["event_date", "market_ticker", "decision_at"])
+
+    # ----------------------------------------------------------------- row
+    def _build_row(
+        self,
+        market: dict,
+        ev: str,
+        target: datetime,
+        close_at: datetime,
+        decision_at: datetime,
+        lead_h: float,
+        low: float | None,
+        high: float | None,
+        quotes: pl.DataFrame,
+    ) -> dict | None:
+        quote = latest_quote_at_or_before(quotes, decision_at).filter(
+            pl.col("market_ticker") == market["market_ticker"]
+        )
+        if quote.is_empty():
+            bid = ask = mid = None
+        else:
+            q = quote.row(0, named=True)
+            bid, ask = q.get("yes_bid_close"), q.get("yes_ask_close")
+            mid = q.get("mid_close")
+
+        p_market = market_probability_from_quote(quote)
+        p_kf = kalshi_forecast_probability(
+            self.forecast_percentiles, decision_at, ev, low, high
+        )
+        p_nbm = nbm_bucket_probability(
+            self.forecasts, decision_at, str(market.get("series_ticker", "")), low, high
+        )
+        if p_market is None and p_kf is None and p_nbm is None:
+            return None  # nothing knowable at this decision time — drop the row
+
+        result = 1 if market.get("result") == "yes" else 0
+        price_for_fee = ask if ask is not None else (mid if mid is not None else 0.5)
+        try:
+            fee = self.fee_schedule.fee_cost(float(price_for_fee), decision_at)
+        except ValueError:
+            fee = float("nan")
+
+        return {
+            "event_date": target,
+            "city": str(market.get("series_ticker", "")),
+            "decision_at": decision_at,
+            "lead_hours": float(lead_h),
+            "market_ticker": market["market_ticker"],
+            "bucket_low": low,
+            "bucket_high": high,
+            "market_bid": bid,
+            "market_ask": ask,
+            "market_mid": mid,
+            "p_market": p_market,
+            "p_kalshi_forecast": p_kf,
+            "p_nbm": p_nbm,
+            "p_gefs": None,
+            "p_emos": None,
+            "p_stack": None,
+            "result": result,
+            "fee": fee,
+            "spread": (ask - bid) if (ask is not None and bid is not None) else None,
+        }
+
+
+def build_from_lake(
+    lake: DataLake,
+    series_ticker: str,
+    snapshots_lead_hours: list[int] | tuple[int, ...] = (24, 12, 6, 3, 1),
+    *,
+    fallback_fee_multiplier: float | None = 0.07,
+) -> pl.DataFrame:
+    """Read bronze tables from the lake and build the gold dataset."""
+    events = lake.read("events").filter(pl.col("series_ticker") == series_ticker)
+    markets = lake.read("markets").filter(pl.col("series_ticker") == series_ticker)
+    quotes = lake.read("quote_1m")
+    pcts = lake.read("forecast_percentiles")
+    forecasts = lake.read("forecasts").filter(pl.col("location_id") == series_ticker)
+    fee_schedule = series_fee_schedule(
+        {"fee_multiplier": fallback_fee_multiplier}, lake.read("fee_changes")
+    )
+    builder = AlphaDatasetBuilder(
+        events=events,
+        markets=markets,
+        quotes=quotes,
+        forecast_percentiles=pcts,
+        forecasts=forecasts,
+        fee_schedule=fee_schedule,
+        snapshots_lead_hours=snapshots_lead_hours,
+    )
+    return builder.build()
