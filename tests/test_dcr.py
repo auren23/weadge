@@ -139,7 +139,6 @@ class TestBackfillSummary:
         """End-to-end against a fake IEM: 2 products (1 prelim, 1 final)
         -> final selection yields 1 report day with a parsed maximum."""
         import httpx
-        import polars as pl
         import respx
 
         from weadge.adapters.noaa.dcr import IEMClient
