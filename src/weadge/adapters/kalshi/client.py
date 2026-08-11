@@ -4,10 +4,25 @@ Responsibilities (so research code never sees them):
   * live vs historical API routing, driven by the /historical/cutoff endpoint
   * token-based rate limiting (read/write budgets kept separate)
   * retry with exponential backoff on 429 / 5xx / connection resets
-  * cursor pagination
+  * cursor pagination (limit + cursor)
   * optional authenticated endpoints (headers only — keys live in env, never in code)
 
 The caller only sees logical methods: client.get_candles(...), client.get_markets(...).
+
+API contract notes (verified 2026-08-11 against the live API):
+  * cutoff response carries ISO timestamps: market_settled_ts /
+    trades_created_ts / orders_updated_ts — there is no "cutoff" key.
+  * pagination is `limit` + `cursor` (events max 200, markets max 1000).
+  * live candlesticks:  /series/{series}/markets/{ticker}/candlesticks
+    historical:         /historical/markets/{ticker}/candlesticks
+    period_interval is an INTEGER number of seconds (60 = 1m).
+  * forecast percentile history:
+    /series/{series}/events/{event}/forecast_percentile_history
+    with repeated `percentiles` params + start_ts/end_ts/period_interval.
+  * historical markets accept NO time-range filters — windows are applied
+    client-side after fetching the series' markets. There is no historical
+    events endpoint at all: live /events serves full history and ignores
+    time filters, so event windows are applied client-side on strike_date.
 """
 
 from __future__ import annotations
@@ -22,12 +37,24 @@ from typing import Any
 
 import httpx
 
+from weadge.adapters.kalshi.auth import API_PATH_PREFIX, sign_headers
 from weadge.domain.time import from_timestamp, to_timestamp
 
 logger = logging.getLogger("weadge.kalshi")
 
-LIVE_BASE = "https://api.elections.kalshi.com/trade-api/v2"
+# Official recommended environment (2026). api.elections.kalshi.com remains
+# supported but is the legacy address.
+LIVE_BASE = "https://external-api.kalshi.com/trade-api/v2"
+LEGACY_LIVE_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 HISTORICAL_PREFIX = "/historical"
+
+# Per-endpoint pagination caps (official).
+LIMIT_EVENTS = 200
+LIMIT_MARKETS = 1000
+
+# Forecast percentile history: 1m granularity, standard weather percentiles.
+FORECAST_PERCENTILES = (10, 25, 50, 75, 90)
+FORECAST_PERIOD_INTERVAL_S = 60
 
 
 class KalshiError(RuntimeError):
@@ -68,6 +95,16 @@ class RateLimiter:
         time.sleep(delay)
 
 
+def parse_api_ts(v: Any) -> datetime:
+    """Parse a Kalshi timestamp that may be epoch seconds (int) or an ISO
+    string (e.g. "2026-06-12T00:00:00Z" or "2026-08-11T04:59:00Z")."""
+    if isinstance(v, (int, float)):
+        return from_timestamp(int(v))
+    if isinstance(v, str):
+        return datetime.fromisoformat(v.replace("Z", "+00:00")).astimezone(UTC)
+    raise TypeError(f"cannot parse Kalshi timestamp {v!r}")
+
+
 class KalshiClient:
     """Typed wrapper over the Kalshi trade-api v2 endpoints.
 
@@ -103,20 +140,23 @@ class KalshiClient:
         self._cutoff_ttl_s = 300.0
 
     # ------------------------------------------------------------------ auth
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, method: str, path: str) -> dict[str, str]:
         headers = {"Accept": "application/json"}
         if self.api_key and self.api_secret:
-            from weadge.adapters.kalshi.auth import sign_headers
-
-            headers.update(sign_headers(self.api_key, self.api_secret))
+            headers.update(
+                sign_headers(self.api_key, self.api_secret, method=method, path=path)
+            )
         return headers
 
     # ------------------------------------------------------------- cutoff
     def historical_cutoff(self, force: bool = False) -> datetime:
         """Timestamp separating live from historical storage.
 
-        Data at or before the cutoff lives in the /historical API; data after
-        it lives in the live API. Cached for TTL seconds.
+        Market data at or before the cutoff lives in the /historical API;
+        data after it lives in the live API. The official response has NO
+        "cutoff" key — markets/candles use `market_settled_ts`
+        (fallbacks: market_positions_last_updated_ts, trades_created_ts).
+        Cached for TTL seconds.
         """
         now = time.monotonic()
         if (
@@ -127,8 +167,13 @@ class KalshiClient:
         ):
             return self._cutoff
         body = self._request("GET", "/historical/cutoff", budget="read", auth=False)
-        raw = body.get("cutoff")
-        self._cutoff = from_timestamp(int(raw)) if raw is not None else datetime.now(UTC)
+        raw = (
+            body.get("market_settled_ts")
+            or body.get("market_positions_last_updated_ts")
+            or body.get("trades_created_ts")
+            or body.get("cutoff")  # legacy shape, tolerated
+        )
+        self._cutoff = parse_api_ts(raw) if raw is not None else datetime.now(UTC)
         self._cutoff_fetched = time.monotonic()
         return self._cutoff
 
@@ -168,12 +213,14 @@ class KalshiClient:
         """Perform one logical request: rate-limit, retry, backoff, paginate-ready.
 
         Returns the JSON body as dict. Callers who need pagination use
-        _request_paged() instead.
+        _request_paged() instead. The signature covers the FULL path as
+        sent (including the /trade-api/v2 prefix, excluding the query).
         """
         retries = retries if retries is not None else self.limiter.max_retries
+        signed_path = f"{API_PATH_PREFIX}{path}"
         for attempt in range(retries + 1):
             self.limiter.wait(budget)
-            headers = self._headers() if auth else {"Accept": "application/json"}
+            headers = self._headers(method, signed_path) if auth else {"Accept": "application/json"}
             try:
                 resp = self._client.request(method, path, params=params, headers=headers)
             except (httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout) as exc:
@@ -205,12 +252,13 @@ class KalshiClient:
         list_key: str,
         budget: str = "read",
         auth: bool = True,
-        page_size: int = 200,
+        limit: int | None = None,
         max_pages: int = 10_000,
     ) -> list[dict[str, Any]]:
-        """GET a cursor-paginated list endpoint, following `cursor` until empty."""
+        """GET a cursor-paginated list endpoint (`limit` + `cursor`)."""
         params = dict(params or {})
-        params.setdefault("page_size", page_size)
+        if limit is not None:
+            params.setdefault("limit", limit)
         rows: list[dict[str, Any]] = []
         cursor: str | None = None
         for _ in range(max_pages):
@@ -239,15 +287,37 @@ class KalshiClient:
         end: datetime | None = None,
         status: str | None = None,
     ) -> list[dict[str, Any]]:
-        path = self._route("/events", start, end)
+        """Events for a series, optionally restricted to [start, end].
+
+        There is NO /historical/events endpoint — the live /events endpoint
+        serves the series' full history, and (verified 2026-08-11) it
+        IGNORES min_close_ts/max_close_ts. Windows are therefore applied
+        client-side on each event's strike_date.
+        """
+        path = "/events"
         params: dict[str, Any] = {"series_ticker": series_ticker}
-        if start is not None:
-            params["min_close_ts"] = to_timestamp(start)
-        if end is not None:
-            params["max_close_ts"] = to_timestamp(end)
         if status is not None:
             params["status"] = status
-        return self._request_paged("GET", path, params, list_key="events")
+        rows = self._request_paged("GET", path, params, list_key="events", limit=LIMIT_EVENTS)
+        if start is not None or end is not None:
+            start_u = start.astimezone(UTC) if start is not None else None
+            end_u = end.astimezone(UTC) if end is not None else None
+            kept: list[dict[str, Any]] = []
+            for r in rows:
+                sd = r.get("strike_date")
+                if not sd:
+                    continue
+                try:
+                    t = parse_api_ts(sd)
+                except (TypeError, ValueError):
+                    continue
+                if start_u is not None and t < start_u:
+                    continue
+                if end_u is not None and t > end_u:
+                    continue
+                kept.append(r)
+            rows = kept
+        return rows
 
     def get_markets(
         self,
@@ -257,33 +327,71 @@ class KalshiClient:
         end: datetime | None = None,
         status: str | None = None,
     ) -> list[dict[str, Any]]:
+        """Markets matching the filter, optionally restricted to the close
+        window [start, end].
+
+        Historical markets accept NO time-range filters, so when the request
+        routes to /historical/markets the window is applied client-side on
+        each market's close_time (the series' full market history is paged).
+        """
         path = self._route("/markets", start, end)
         params: dict[str, Any] = {}
         if series_ticker:
             params["series_ticker"] = series_ticker
         if event_ticker:
             params["event_ticker"] = event_ticker
-        if start is not None:
-            params["min_close_ts"] = to_timestamp(start)
-        if end is not None:
-            params["max_close_ts"] = to_timestamp(end)
         if status is not None:
             params["status"] = status
-        return self._request_paged("GET", path, params, list_key="markets")
+        historical = path.startswith(HISTORICAL_PREFIX)
+        if not historical:
+            if start is not None:
+                params["min_close_ts"] = to_timestamp(start)
+            if end is not None:
+                params["max_close_ts"] = to_timestamp(end)
+        rows = self._request_paged(
+            "GET", path, params, list_key="markets", limit=LIMIT_MARKETS
+        )
+        if historical and (start is not None or end is not None):
+            start_u = start.astimezone(UTC) if start is not None else None
+            end_u = end.astimezone(UTC) if end is not None else None
+            rows = [
+                r
+                for r in rows
+                if r.get("close_time") is not None
+                and (start_u is None or parse_api_ts(r["close_time"]) >= start_u)
+                and (end_u is None or parse_api_ts(r["close_time"]) <= end_u)
+            ]
+        return rows
 
     def get_market_candles(
         self,
         market_ticker: str,
+        series_ticker: str | None,
         start: datetime,
         end: datetime,
-        period_interval: str = "1m",
+        period_interval_s: int = 60,
     ) -> list[dict[str, Any]]:
-        """1-minute YES bid/ask OHLC candles for one market."""
-        path = self._route(f"/markets/{market_ticker}/candlesticks", start, end)
+        """1-minute YES bid/ask OHLC candles for one market.
+
+        Live:  /series/{series}/markets/{ticker}/candlesticks
+        Historical: /historical/markets/{ticker}/candlesticks
+        `period_interval` is an integer number of seconds (60 = 1m).
+        """
+        start = start.astimezone(UTC)
+        end = end.astimezone(UTC)
+        if end <= self.historical_cutoff():
+            path = f"{HISTORICAL_PREFIX}/markets/{market_ticker}/candlesticks"
+        else:
+            if series_ticker is None:
+                raise KalshiError(
+                    "live candlesticks need the series ticker "
+                    "(path is /series/{series}/markets/{ticker}/candlesticks)"
+                )
+            path = f"/series/{series_ticker}/markets/{market_ticker}/candlesticks"
         params = {
             "start_ts": to_timestamp(start),
             "end_ts": to_timestamp(end),
-            "period_interval": period_interval,
+            "period_interval": period_interval_s,
         }
         body = self._request("GET", path, params=params, budget="read")
         return body.get("candlesticks", [])
@@ -292,23 +400,41 @@ class KalshiClient:
         self,
         event_ticker: str,
         series_ticker: str,
-        interval: str = "1m",
+        start: datetime,
+        end: datetime,
+        percentiles: tuple[int, ...] = FORECAST_PERCENTILES,
+        period_interval_s: int = FORECAST_PERIOD_INTERVAL_S,
     ) -> list[dict[str, Any]]:
-        """Kalshi's own forecast percentile history for an event."""
-        path = self._route(f"/events/{event_ticker}/forecast_percentile_history", None, None)
-        params = {"series_ticker": series_ticker, "interval": interval}
+        """Kalshi's own forecast percentile history for one event.
+
+        Endpoint: /series/{series}/events/{event}/forecast_percentile_history
+        with repeated `percentiles` params and an integer period_interval
+        (seconds). Returns `forecast_history[]` — flattening happens in the
+        adapter layer.
+        """
+        path = f"/series/{series_ticker}/events/{event_ticker}/forecast_percentile_history"
+        params: dict[str, Any] = {
+            "start_ts": to_timestamp(start),
+            "end_ts": to_timestamp(end),
+            "period_interval": period_interval_s,
+        }
+        for p in percentiles:
+            params.setdefault("percentiles", []).append(str(p))
         body = self._request("GET", path, params=params, budget="read")
-        return body.get("forecast_percentile_history", [])
+        return body.get("forecast_history", [])
 
     def get_series_fee_changes(
         self,
         series_ticker: str,
         show_historical: bool = True,
     ) -> list[dict[str, Any]]:
-        path = self._route(f"/series/{series_ticker}/fee_changes", None, None)
-        params = {"show_historical": "true" if show_historical else "false"}
+        path = "/series/fee_changes"
+        params = {
+            "series_ticker": series_ticker,
+            "show_historical": "true" if show_historical else "false",
+        }
         body = self._request("GET", path, params=params, budget="read")
-        return body.get("fee_changes", [])
+        return body.get("series_fee_change_arr", [])
 
     # ------------------------------------------------------------------ misc
     def close(self) -> None:

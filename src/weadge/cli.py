@@ -25,6 +25,7 @@ from rich.console import Console
 
 from weadge.config import data_root, load_cities, load_research
 from weadge.storage.parquet import DataLake
+from weadge.storage.schema import empty_frame
 
 app = typer.Typer(help="weadge — weather prediction-market alpha research engine", no_args_is_help=True)
 console = Console()
@@ -96,6 +97,7 @@ def backfill(series: _series_arg, start: str | None = None, end: str | None = No
         for ev in events.iter_rows(named=True):
             ev_ticker = ev["event_ticker"]
             ev_markets = markets.filter(pl_col_market_event(ev_ticker))
+
             for m in ev_markets.iter_rows(named=True):
                 close_at = m["close_at"]
                 if close_at is None:
@@ -105,14 +107,27 @@ def backfill(series: _series_arg, start: str | None = None, end: str | None = No
                 if candle_start is None:
                     continue
                 candles = candles_frame(
-                    client, m["market_ticker"],
+                    client,
+                    m["market_ticker"],
                     start=candle_start,
                     end=close_at,
+                    series_ticker=series,
                     save_raw=True,
                 )
                 lake.write_parquet("quote_1m", candles, layer="bronze",
                                    partition_by="market_ticker")
-            pcts = forecast_percentile_frame(client, ev_ticker, series, save_raw=True)
+
+            # forecast percentile window = the event's market open..close span
+            f_start = ev_markets["open_at"].min()
+            f_end = ev_markets["close_at"].max()
+            if f_start is not None and f_end is not None:
+                pcts = forecast_percentile_frame(
+                    client, ev_ticker, series,
+                    start=f_start, end=f_end, save_raw=True,
+                )
+            else:
+                pcts = empty_frame("forecast_percentiles")
+                console.print(f"  {ev_ticker}: no market window — forecast skipped")
             lake.write_parquet("forecast_percentiles", pcts, layer="bronze",
                                partition_by="event_ticker")
             console.print(f"  {ev_ticker}: {len(ev_markets)} markets, {pcts.height} pct rows")

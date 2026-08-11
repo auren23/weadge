@@ -36,13 +36,15 @@ def fee_changes_frame(
     rows = [
         {
             "series_ticker": series_ticker,
-            "effective_at": from_timestamp(int(r["effective_time"])),
+            "effective_at": from_timestamp(int(r["effective_time"]))
+            if r.get("effective_time") is not None
+            else (from_timestamp(int(r["effective_at"])) if r.get("effective_at") is not None else None),
             "fee_type": r.get("fee_type", ""),
             "fee_multiplier": _f(r.get("fee_multiplier")),
             "ingested_at": utc_now(),
         }
         for r in raw_rows
-        if r.get("effective_time") is not None
+        if r.get("effective_time") is not None or r.get("effective_at") is not None
     ]
     if save_raw and raw_rows:
         lake = getattr(client, "_lake", None)

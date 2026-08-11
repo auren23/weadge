@@ -2,17 +2,25 @@
 
 Every adapter returns a polars frame in the canonical schema (storage.schema)
 and can optionally persist the raw JSON payload into the data lake.
+
+Verified wire notes (2026-08-11):
+  * events carry `strike_date` (ISO datetime), NOT `target_date`. The target
+    date is the strike's LOCAL calendar date in the series timezone (e.g.
+    strike 2026-08-11T03:59:00Z = 23:59 EDT Aug 10 -> target Aug 10).
+  * markets carry ISO datetime strings (open_time/close_time), `settlement_ts`
+    (epoch) and `settlement_value_dollars`.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import polars as pl
 
-from weadge.adapters.kalshi.client import KalshiClient
-from weadge.domain.time import ensure_utc, from_timestamp
+from weadge.adapters.kalshi.client import KalshiClient, parse_api_ts
+from weadge.domain.time import ensure_utc
 from weadge.storage.schema import (
     EVENT_SCHEMA,
     MARKET_SCHEMA,
@@ -32,17 +40,23 @@ def _coerce_float(v: Any) -> float | None:
 def _dt(v: Any) -> datetime | None:
     if v is None or v == "":
         return None
-    return from_timestamp(int(v))
+    return parse_api_ts(v)
 
 
-def _target_date_to_utc(date_str: str) -> datetime | None:
-    """'2026-08-12' -> UTC midnight. Best-effort: the true settlement window
-    is local-time-based; the settlement oracle fixes this later."""
+def _strike_date_to_target(date_str: str, timezone: str = "America/New_York") -> datetime | None:
+    """Kalshi event strike_date (ISO) -> local target date at UTC midnight.
+
+    The event's `target_date` IS the local calendar date the market settles
+    for; the strike instant expressed in the series timezone gives it
+    directly (Kalshi stores strikes at the local midnight boundary).
+    """
     if not date_str:
         return None
     try:
-        return datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=UTC)
-    except ValueError:
+        strike = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        local_day = strike.astimezone(ZoneInfo(timezone)).date()
+        return datetime(local_day.year, local_day.month, local_day.day, tzinfo=UTC)
+    except (ValueError, TypeError):
         return None
 
 
@@ -78,7 +92,7 @@ def events_frame(
         {
             "event_ticker": e.get("event_ticker", ""),
             "series_ticker": series_ticker,
-            "target_date": _target_date_to_utc(e.get("target_date", "")),
+            "target_date": _strike_date_to_target(e.get("strike_date", "")),
             "location_id": e.get("location", "") or series_ticker,
             "ingested_at": ensure_utc(datetime.now(UTC)),
         }
@@ -116,9 +130,9 @@ def markets_frame(
             "cap_strike": _coerce_float(m.get("cap_strike")),
             "open_at": _dt(m.get("open_time")),
             "close_at": _dt(m.get("close_time")),
-            "settled_at": _dt(m.get("settlement_time")),
+            "settled_at": _dt(m.get("settlement_ts")),
             "result": m.get("result") or None,
-            "settlement_value": m.get("settlement_value") or None,
+            "settlement_value": m.get("settlement_value_dollars") or m.get("settlement_value"),
             "rules_primary": m.get("rules_primary", ""),
             "rules_secondary": m.get("rules_secondary", ""),
             "ingested_at": ensure_utc(datetime.now(UTC)),
