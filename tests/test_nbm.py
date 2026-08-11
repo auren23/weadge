@@ -14,6 +14,7 @@ grid resolution of the station card).
 
 from __future__ import annotations
 
+import itertools
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -42,7 +43,7 @@ class TestIdx:
         assert rows[0].record == 225
         assert rows[-1].record == 266
         # consecutive offsets chain correctly
-        for a, b in zip(rows, rows[1:], strict=False):
+        for a, b in itertools.pairwise(rows):
             assert a.next_offset == b.offset
 
     def test_max_2t_records_family(self) -> None:
