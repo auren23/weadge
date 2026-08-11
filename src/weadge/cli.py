@@ -195,13 +195,23 @@ def dataset_build(
     from weadge.dataset.builder import build_from_lake
 
     cfg = load_research()
-    df = build_from_lake(
+    df, stats = build_from_lake(
         _lake(), series, snapshots_lead_hours=tuple(leads),
         fallback_fee_multiplier=cfg.fees.get("fallback_fee_multiplier"),
     )
     path = _lake().gold_path()
     df.write_parquet(path, compression="zstd")
     console.print(f"[green]alpha dataset: {df.height} rows -> {path}[/green]")
+    console.print(f"cells (theoretical max)   {stats['cells_total']}")
+    console.print(f"rows built                {stats['rows_built']}")
+    console.print(f"rows dropped (all missing){stats['rows_dropped']}")
+    console.print("drop reasons (cells)")
+    console.print(f"  missing_market_quote      {stats['missing_market_quote']}")
+    console.print(f"  missing_nbm               {stats['missing_nbm']}")
+    console.print(f"  missing_kalshi_forecast   {stats['missing_kalshi_forecast']}")
+    console.print("drop reasons (partitions)")
+    console.print(f"  market_partition_incomplete {stats['market_partition_incomplete']}")
+    console.print(f"  simplex_infeasible          {stats['simplex_infeasible']}")
 
 
 # ------------------------------------------------------------------- noaa

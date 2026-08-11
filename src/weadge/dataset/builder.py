@@ -8,6 +8,7 @@ otherwise.
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime
 
 import polars as pl
@@ -48,12 +49,13 @@ class AlphaDatasetBuilder:
         self.forecasts = forecasts
         self.fee_schedule = fee_schedule
         self.snapshots = sorted(snapshots_lead_hours)
+        # honest accounting: why the theoretical-max cells are missing
+        self.drop_stats: dict[str, int] = {}
+        self._cell_missing: list[dict[str, bool]] = []
 
     # ---------------------------------------------------------------- build
     def build(self) -> pl.DataFrame:
-        ev_map = {
-            str(r["event_ticker"]): r for r in self.events.iter_rows(named=True)
-        }
+        ev_map = {str(r["event_ticker"]): r for r in self.events.iter_rows(named=True)}
         event_dates = {t: r.get("target_date") for t, r in ev_map.items()}
 
         # pre-compute mid per quote row
@@ -61,6 +63,7 @@ class AlphaDatasetBuilder:
             ((pl.col("yes_bid_close") + pl.col("yes_ask_close")) / 2.0).alias("mid_close")
         )
 
+        n_cells = 0
         rows: list[dict] = []
         for m in self.markets.iter_rows(named=True):
             ev = str(m["event_ticker"])
@@ -71,6 +74,7 @@ class AlphaDatasetBuilder:
             close_at = ensure_utc(close_at)
             low = m.get("floor_strike")
             high = m.get("cap_strike")
+            n_cells += len(self.snapshots)
             for lead_h in self.snapshots:
                 decision_at = shift(close_at, hours=-lead_h)
                 row = self._build_row(
@@ -80,6 +84,7 @@ class AlphaDatasetBuilder:
                     rows.append(row)
 
         if not rows:
+            self._finalize_stats(n_cells, 0, pl.DataFrame(schema=ALPHA_DATASET_SCHEMA))
             return empty_frame("alpha_dataset")
         df = pl.DataFrame(rows, schema=ALPHA_DATASET_SCHEMA)
         # Phase B: partition-level market baselines (normalized / simplex /
@@ -88,7 +93,29 @@ class AlphaDatasetBuilder:
         df = add_market_baselines(df)
         df = df.sort(["event_date", "market_ticker", "decision_at"])
         self._assert_bucket_distributions(df)
+        self._finalize_stats(n_cells, len(rows), df)
         return df
+
+    def _finalize_stats(self, n_cells: int, n_rows: int, df: pl.DataFrame) -> None:
+        """Why the gold frame is smaller than the theoretical max."""
+        missing = Counter()
+        for cell in self._cell_missing:
+            for k, v in cell.items():
+                missing[k] += int(v)
+        parts = df.group_by(["series_ticker", "event_ticker", "decision_at"]).agg(
+            pl.col("p_market_normalized").is_null().all().alias("norm_incomplete"),
+            pl.col("market_simplex_feasible").eq(False).all().alias("simplex_infeasible"),
+        )
+        self.drop_stats = {
+            "cells_total": n_cells,
+            "rows_built": n_rows,
+            "rows_dropped": n_cells - n_rows,
+            "missing_market_quote": missing["missing_market_quote"],
+            "missing_nbm": missing["missing_nbm"],
+            "missing_kalshi_forecast": missing["missing_kalshi_forecast"],
+            "market_partition_incomplete": int(parts.filter("norm_incomplete").height),
+            "simplex_infeasible": int(parts.filter("simplex_infeasible").height),
+        }
 
     def _assert_bucket_distributions(self, df: pl.DataFrame, tolerance: float = 1e-6) -> None:
         """Every (series, event, snapshot) partition of p_nbm must sum to ~1.
@@ -136,11 +163,16 @@ class AlphaDatasetBuilder:
             mid = q.get("mid_close")
 
         p_market_raw = market_probability_from_quote(quote)
-        p_kf = kalshi_forecast_probability(
-            self.forecast_percentiles, decision_at, ev, low, high
-        )
+        p_kf = kalshi_forecast_probability(self.forecast_percentiles, decision_at, ev, low, high)
         p_nbm = nbm_bucket_probability(
             self.forecasts, decision_at, str(market.get("series_ticker", "")), low, high
+        )
+        self._cell_missing.append(
+            {
+                "missing_market_quote": p_market_raw is None,
+                "missing_kalshi_forecast": p_kf is None,
+                "missing_nbm": p_nbm is None,
+            }
         )
         if p_market_raw is None and p_kf is None and p_nbm is None:
             return None  # nothing knowable at this decision time — drop the row
@@ -208,4 +240,5 @@ def build_from_lake(
         fee_schedule=fee_schedule,
         snapshots_lead_hours=snapshots_lead_hours,
     )
-    return builder.build()
+    df = builder.build()
+    return df, builder.drop_stats

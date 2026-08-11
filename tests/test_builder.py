@@ -21,9 +21,12 @@ SNAPSHOTS = (24, 12, 6, 3, 1)
 def _events() -> pl.DataFrame:
     return pl.DataFrame(
         [
-            {"event_ticker": EVENT, "series_ticker": SERIES,
-             "target_date": datetime(2026, 7, 1, 0, 0, tzinfo=UTC),
-             "location_id": SERIES},
+            {
+                "event_ticker": EVENT,
+                "series_ticker": SERIES,
+                "target_date": datetime(2026, 7, 1, 0, 0, tzinfo=UTC),
+                "location_id": SERIES,
+            },
         ]
     )
 
@@ -31,10 +34,10 @@ def _events() -> pl.DataFrame:
 def _markets() -> pl.DataFrame:
     rows = []
     for ticker, lo, hi, result in [
-        (f"{EVENT}-M1", None, 88.0, "no"),   # unbounded lower tail
+        (f"{EVENT}-M1", None, 88.0, "no"),  # unbounded lower tail
         (f"{EVENT}-M2", 88.0, 90.0, "no"),
         (f"{EVENT}-M3", 90.0, 92.0, "yes"),
-        (f"{EVENT}-M4", 92.0, None, "no"),   # unbounded upper tail
+        (f"{EVENT}-M4", 92.0, None, "no"),  # unbounded upper tail
     ]:
         rows.append(
             {
@@ -86,9 +89,9 @@ def _percentiles() -> pl.DataFrame:
 def _forecasts() -> pl.DataFrame:
     """Three runs with different availability:
 
-      early (mean 88)  available ~44h before close  -> used by 24h/12h/6h/3h snapshots
-      mid   (mean 91)  available 2h before close    -> used by the 1h snapshot only
-      late  (mean 99)  available 1h AFTER close     -> leak bait, never used
+    early (mean 88)  available ~44h before close  -> used by 24h/12h/6h/3h snapshots
+    mid   (mean 91)  available 2h before close    -> used by the 1h snapshot only
+    late  (mean 99)  available 1h AFTER close     -> leak bait, never used
     """
     early = make_forecast_snapshots(SERIES, datetime(2026, 7, 1, 0, 0, tzinfo=UTC), base_mean=88.0)
     mid = make_forecast_snapshots(SERIES, datetime(2026, 7, 1, 0, 0, tzinfo=UTC), base_mean=91.0)
@@ -115,21 +118,26 @@ def builder() -> AlphaDatasetBuilder:
 class TestAlphaDataset:
     def test_shape(self, builder) -> None:
         df = builder.build()
-        assert df.height == 4 * len(SNAPSHOTS)   # 4 markets x 5 snapshots
+        assert df.height == 4 * len(SNAPSHOTS)  # 4 markets x 5 snapshots
         assert sorted(df["lead_hours"].to_list()) == sorted([24.0, 12.0, 6.0, 3.0, 1.0] * 4)
 
     def test_result_column(self, builder) -> None:
         df = builder.build()
-        by_market = df.group_by("market_ticker").first().select(
-            "market_ticker", "result"
-        ).sort("market_ticker")
+        by_market = (
+            df.group_by("market_ticker")
+            .first()
+            .select("market_ticker", "result")
+            .sort("market_ticker")
+        )
         assert by_market["result"].to_list() == [0, 0, 1, 0]
 
     def test_market_probability_from_quote(self, builder) -> None:
         df = builder.build()
-        row = df.filter(pl.col("market_ticker") == f"{EVENT}-M3").filter(
-            pl.col("lead_hours") == 24.0
-        ).row(0, named=True)
+        row = (
+            df.filter(pl.col("market_ticker") == f"{EVENT}-M3")
+            .filter(pl.col("lead_hours") == 24.0)
+            .row(0, named=True)
+        )
         # at close-24h the latest COMPLETED bar is close-24h-1m (a bar whose
         # ts == decision_at is still open and its close is not knowable)
         start = shift(CLOSE, hours=-26)
@@ -151,12 +159,16 @@ class TestAlphaDataset:
         #   N(88,2) -> P(90<=X<92) ~ 0.14
         # mid run (mean 91) is knowable at close-1h:
         #   N(91,2) -> P(90<=X<92) ~ 0.38
-        early_row = df.filter(pl.col("market_ticker") == f"{EVENT}-M3").filter(
-            pl.col("lead_hours") == 24.0
-        ).row(0, named=True)
-        late_row = df.filter(pl.col("market_ticker") == f"{EVENT}-M3").filter(
-            pl.col("lead_hours") == 1.0
-        ).row(0, named=True)
+        early_row = (
+            df.filter(pl.col("market_ticker") == f"{EVENT}-M3")
+            .filter(pl.col("lead_hours") == 24.0)
+            .row(0, named=True)
+        )
+        late_row = (
+            df.filter(pl.col("market_ticker") == f"{EVENT}-M3")
+            .filter(pl.col("lead_hours") == 1.0)
+            .row(0, named=True)
+        )
         assert late_row["p_nbm"] > early_row["p_nbm"] + 0.1
 
     def test_bucket_sum_guard_rejects_partial_partition(self) -> None:
@@ -179,9 +191,11 @@ class TestAlphaDataset:
         """With mean/std present the Normal baseline wins; percentiles are
         only a fallback — never an override."""
         df = builder.build()
-        row = df.filter(pl.col("market_ticker") == f"{EVENT}-M3").filter(
-            pl.col("lead_hours") == 24.0
-        ).row(0, named=True)
+        row = (
+            df.filter(pl.col("market_ticker") == f"{EVENT}-M3")
+            .filter(pl.col("lead_hours") == 24.0)
+            .row(0, named=True)
+        )
         from scipy import stats as _stats
 
         expected = _stats.norm.cdf(92.0, 88.0, 2.0) - _stats.norm.cdf(90.0, 88.0, 2.0)
@@ -192,9 +206,11 @@ class TestAlphaDataset:
         from weadge.backtest.fees import round_up_to_cent
 
         df = builder.build()
-        row = df.filter(pl.col("market_ticker") == f"{EVENT}-M2").filter(
-            pl.col("lead_hours") == 3.0
-        ).row(0, named=True)
+        row = (
+            df.filter(pl.col("market_ticker") == f"{EVENT}-M2")
+            .filter(pl.col("lead_hours") == 3.0)
+            .row(0, named=True)
+        )
         expected = round_up_to_cent(0.07 * row["market_ask"] * (1 - row["market_ask"]))
         assert row["fee"] == pytest.approx(expected, abs=1e-9)
         assert row["fee"] < row["market_ask"] * 0.07  # P(1-P) shrinks the old price*M fee
@@ -283,8 +299,41 @@ class TestAlphaDataset:
             snapshots_lead_hours=SNAPSHOTS,
         )
         df = b.build()
-        assert df["market_mid"].null_count() == df.height // 4   # only M3 rows lack quotes
+        assert df["market_mid"].null_count() == df.height // 4  # only M3 rows lack quotes
         assert df["p_market_normalized"].null_count() == df.height  # whole partition fails closed
         assert df["p_market_simplex"].null_count() == df.height
         assert df["market_simplex_feasible"].to_list() == [False] * df.height
         assert df["market_prob_sum_raw"].null_count() == df.height
+        # the accounting sees exactly the missing M3 cells (4 markets x 5 snapshots)
+        s = b.drop_stats
+        assert s["cells_total"] == 4 * 5 and s["rows_built"] == 4 * 5
+        assert s["missing_market_quote"] == 5
+        assert s["market_partition_incomplete"] == 5  # every partition fails closed
+        assert s["simplex_infeasible"] == 5
+
+    def test_drop_stats_accounting(self) -> None:
+        """Quotes/percentiles/early NBM all start at close-20h: the 24h
+        snapshot has nothing knowable -> 4 rows dropped, reasons tallied."""
+        quotes = _quotes().filter(pl.col("ts") >= shift(CLOSE, hours=-20))
+        pcts = make_percentile_history(EVENT, periods=1, start=shift(CLOSE, hours=-20), center=90.0)
+        # only the mid run (available close-2h) and leak bait (close+1h) remain
+        forecasts = _forecasts().filter(pl.col("available_at") >= shift(CLOSE, hours=-2))
+        fee = FeeSchedule([(datetime(2026, 6, 1, 0, 0, tzinfo=UTC), "taker", 1.0)])
+        b = AlphaDatasetBuilder(
+            events=_events(),
+            markets=_markets(),
+            quotes=quotes,
+            forecast_percentiles=pcts,
+            forecasts=forecasts,
+            fee_schedule=fee,
+            snapshots_lead_hours=SNAPSHOTS,
+        )
+        b.build()
+        s = b.drop_stats
+        assert s["cells_total"] == 4 * 5
+        assert s["rows_built"] == 16 and s["rows_dropped"] == 4
+        assert s["missing_market_quote"] == 4  # 24h cells only
+        assert s["missing_kalshi_forecast"] == 4  # 24h cells only
+        assert s["missing_nbm"] == 16  # 24/12/6/3h cells
+        assert s["market_partition_incomplete"] == 0  # quotes exist at 12/6/3/1h
+        assert s["simplex_infeasible"] == 4  # fixture books sum > 1
