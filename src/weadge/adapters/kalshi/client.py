@@ -225,11 +225,13 @@ class KalshiClient:
             headers = self._headers(method, signed_path) if auth else {"Accept": "application/json"}
             try:
                 resp = self._client.request(method, path, params=params, headers=headers)
-            except (httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout) as exc:
+            except httpx.TransportError as exc:
+                # broad retry: ConnectError / ReadTimeout / ReadError /
+                # RemoteProtocolError (peer drops big candle bodies) etc.
                 if attempt < retries:
                     self.limiter.sleep_backoff(attempt)
                     continue
-                raise KalshiError(f"connection failed after {retries} retries: {path}") from exc
+                raise KalshiError(f"transport failed after {retries} retries: {path}") from exc
 
             if resp.status_code == 429:
                 if attempt < retries:
