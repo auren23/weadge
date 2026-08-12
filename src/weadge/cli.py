@@ -80,6 +80,7 @@ def backfill(series: _series_arg, start: str | None = None, end: str | None = No
     with KalshiClient() as client:
         client._lake = _lake()  # type: ignore[attr-defined]  # raw capture hook
         from weadge.adapters.kalshi.candles import candles_frame
+        from weadge.adapters.kalshi.client import KalshiError
         from weadge.adapters.kalshi.fees import fee_changes_frame
         from weadge.adapters.kalshi.forecasts import forecast_percentile_frame
         from weadge.adapters.kalshi.markets import events_frame, markets_frame
@@ -121,10 +122,18 @@ def backfill(series: _series_arg, start: str | None = None, end: str | None = No
             f_start = ev_markets["open_at"].min()
             f_end = ev_markets["close_at"].max()
             if f_start is not None and f_end is not None:
-                pcts = forecast_percentile_frame(
-                    client, ev_ticker, series,
-                    start=f_start, end=f_end, save_raw=True,
-                )
+                try:
+                    pcts = forecast_percentile_frame(
+                        client, ev_ticker, series,
+                        start=f_start, end=f_end, save_raw=True,
+                    )
+                except KalshiError as exc:
+                    # server-side quirk (e.g. an intraday-open event whose
+                    # forecast history start_ts is rejected with 400): the
+                    # event keeps market/candle data, only the kalshi_forecast
+                    # baseline is missing — recorded, not fatal
+                    pcts = empty_frame("forecast_percentiles")
+                    console.print(f"  [yellow]{ev_ticker}: forecast history unavailable — {exc}[/yellow]")
             else:
                 pcts = empty_frame("forecast_percentiles")
                 console.print(f"  {ev_ticker}: no market window — forecast skipped")
@@ -212,6 +221,7 @@ def dataset_build(
     console.print("drop reasons (partitions)")
     console.print(f"  market_partition_incomplete {stats['market_partition_incomplete']}")
     console.print(f"  simplex_infeasible          {stats['simplex_infeasible']}")
+    console.print(f"  unsettled_market (no truth) {stats.get('unsettled_market', 0)}")
 
 
 # ------------------------------------------------------------------- noaa

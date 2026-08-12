@@ -52,6 +52,7 @@ class AlphaDatasetBuilder:
         # honest accounting: why the theoretical-max cells are missing
         self.drop_stats: dict[str, int] = {}
         self._cell_missing: list[dict[str, bool]] = []
+        self._unsettled = 0
 
     # ---------------------------------------------------------------- build
     def build(self) -> pl.DataFrame:
@@ -66,6 +67,11 @@ class AlphaDatasetBuilder:
         n_cells = 0
         rows: list[dict] = []
         for m in self.markets.iter_rows(named=True):
+            if m.get("result") not in ("yes", "no"):
+                # unsettled / void / cancelled market: no settlement truth.
+                # Scoring it as a loss (result=0) would poison the dataset.
+                self._unsettled += 1
+                continue
             ev = str(m["event_ticker"])
             close_at = m.get("close_at")
             target = event_dates.get(ev)
@@ -115,6 +121,7 @@ class AlphaDatasetBuilder:
             "missing_kalshi_forecast": missing["missing_kalshi_forecast"],
             "market_partition_incomplete": int(parts.filter("norm_incomplete").height),
             "simplex_infeasible": int(parts.filter("simplex_infeasible").height),
+            "unsettled_market": self._unsettled,
         }
 
     def _assert_bucket_distributions(self, df: pl.DataFrame, tolerance: float = 1e-6) -> None:
