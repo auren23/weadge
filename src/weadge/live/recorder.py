@@ -19,6 +19,7 @@ class JsonlZstAppender:
         self.root = Path(out_root)
         self.series = series
         self._fh: object | None = None
+        self._raw: object | None = None
         self._current: str | None = None
 
     def append(self, timestamp: str, row: dict) -> None:
@@ -30,6 +31,15 @@ class JsonlZstAppender:
         # mypy: stream_writer on self._fh — see _rotate
         self._fh.write((json.dumps(payload, default=str) + "\n").encode())  # type: ignore[attr-defined]
 
+    def flush(self) -> None:
+        """Push buffered rows through the compressor to the OS. A recorder
+        that only flushes on hourly rotation loses up to an hour on crash;
+        call this periodically (rows after the last flush are still lost —
+        acceptable for tick recording, not for anything transactional)."""
+        if self._fh is not None:
+            self._fh.flush()  # type: ignore[attr-defined]
+            self._raw.flush()  # type: ignore[attr-defined]
+
     def _rotate(self, hour_key: str) -> None:
         if self._fh is not None:
             self._fh.close()  # type: ignore[attr-defined]
@@ -39,11 +49,13 @@ class JsonlZstAppender:
         compressor = zstd.ZstdCompressor(level=3)
         # the stream writer must outlive a single append, so the file handle
         # is deliberately kept open across calls (not context-managed per write)
-        self._fh = compressor.stream_writer(open(path, "ab"))  # noqa: SIM115
+        self._raw = open(path, "ab")  # noqa: SIM115
+        self._fh = compressor.stream_writer(self._raw)
         self._current = hour_key
 
     def close(self) -> None:
         if self._fh is not None:
             self._fh.close()  # type: ignore[attr-defined]
             self._fh = None
+            self._raw = None
             self._current = None

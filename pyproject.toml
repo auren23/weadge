@@ -28,6 +28,7 @@ dependencies = [
     "zstandard>=0.22",
     "cryptography>=42.0",  # Kalshi request signing (RSA-PSS) for authenticated endpoints
     "pygrib>=2.1.8",
+    "websockets>=13",
 ]
 
 [dependency-groups]
