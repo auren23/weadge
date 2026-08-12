@@ -365,20 +365,24 @@ def research_calibration(series: _series_opt) -> None:
 def research_incremental(series: _series_opt) -> None:
     """Alpha existence test: does weather add OOS info given the market?
 
-    Walk-forward, paired samples, event/date clustered bootstrap, run for
-    EACH market construction (raw / normalized / simplex). Weather alpha is
-    only credible if it survives all three M0 baselines.
+    True monthly expanding walk-forward (3-month train, 1-month test,
+    non-overlapping OOS windows); paired samples, event/date clustered
+    bootstrap, run for EACH market construction (raw / normalized /
+    simplex). Weather alpha is only credible if it survives all three M0
+    baselines.
+
+    Earlier smoke runs (daily 3-day train windows) produced overlapping
+    test windows and are INVALID; results were diagnostic-only.
     """
     from weadge.research.edge import paired_incremental_gate
-    from weadge.research.walk_forward import split_frame
+    from weadge.research.walk_forward import split_frame, walk_forward_splits
 
     df = _load_gold(series)
     dates = sorted(df["event_date"].unique().to_list())
     baselines = ["p_market_raw", "p_market_normalized", "p_market_simplex"]
     wins = {b: 0 for b in baselines}
     total = 0
-    for i in range(len(dates) - 3):
-        train_start, test_start = dates[i], dates[i + 3]
+    for train_start, test_start in walk_forward_splits(dates, 3, 1):
         train, test = split_frame(df, train_start, test_start)
         if test.is_empty():
             continue
@@ -395,6 +399,12 @@ def research_incremental(series: _series_opt) -> None:
             )
     for base in baselines:
         console.print(f"incremental alpha vs {base}: {wins[base]}/{total} windows")
+    if total == 0:
+        console.print(
+            "[yellow]insufficient history for monthly walk-forward: "
+            "need > train_months+test_months of event months[/yellow]"
+        )
+        return
     if all(wins[b] == total for b in baselines):
         console.print("[green]weather alpha robust to market construction[/green]")
     elif wins["p_market_raw"] == total and wins["p_market_simplex"] < total:
@@ -422,16 +432,16 @@ def research_latency(series: _series_opt) -> None:
 def research_walk_forward(series: _series_opt) -> None:
     """Chronological walk-forward: log loss of M0 vs M2 per expanding window.
 
-    All models are scored on the same (paired) rows; the significance gate
-    lives in `research incremental` (clustered bootstrap).
+    True monthly expanding train (3 months) with 1-month non-overlapping
+    test windows. All models are scored on the same (paired) rows; the
+    significance gate lives in `research incremental` (clustered bootstrap).
     """
     from weadge.research.edge import fit_incremental
-    from weadge.research.walk_forward import split_frame
+    from weadge.research.walk_forward import split_frame, walk_forward_splits
 
     df = _load_gold(series)
     dates = sorted(df["event_date"].unique().to_list())
-    for i in range(0, len(dates) - 3):
-        train_start, test_start = dates[i], dates[i + 3]
+    for train_start, test_start in walk_forward_splits(dates, 3, 1):
         train, test = split_frame(df, train_start, test_start)
         if test.is_empty():
             continue
