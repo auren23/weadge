@@ -72,6 +72,21 @@ QUOTE_1M_SCHEMA: Schema = {
     "ingested_at": pl.Datetime("us", time_zone="UTC"),
 }
 
+# trades: one row per public trade print. taker_side is the aggressor's
+# outcome side: "yes" = taker bought YES (lifted the ask), "no" = taker
+# bought NO (hit the YES bid). Prices are dollar probabilities in [0, 1].
+TRADE_SCHEMA: Schema = {
+    "market_ticker": pl.Utf8,
+    "trade_id": pl.Utf8,
+    "created_at": pl.Datetime("us", time_zone="UTC"),
+    "yes_price": pl.Float64,
+    "no_price": pl.Float64,
+    "count": pl.Float64,
+    "taker_side": pl.Utf8,
+    "is_block_trade": pl.Boolean,
+    "ingested_at": pl.Datetime("us", time_zone="UTC"),
+}
+
 # forecast_percentiles: Kalshi event forecast percentile history
 FORECAST_PERCENTILE_SCHEMA: Schema = {
     "event_ticker": pl.Utf8,
@@ -170,6 +185,7 @@ SCHEMAS: dict[str, Schema] = {
     "events": EVENT_SCHEMA,
     "markets": MARKET_SCHEMA,
     "quote_1m": QUOTE_1M_SCHEMA,
+    "trades": TRADE_SCHEMA,
     "forecast_percentiles": FORECAST_PERCENTILE_SCHEMA,
     "fee_changes": FEE_CHANGES_SCHEMA,
     "observations": OBSERVATION_SCHEMA,

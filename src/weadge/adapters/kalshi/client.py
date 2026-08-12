@@ -53,6 +53,7 @@ HISTORICAL_PREFIX = "/historical"
 # Per-endpoint pagination caps (official).
 LIMIT_EVENTS = 200
 LIMIT_MARKETS = 1000
+LIMIT_TRADES = 1000
 
 # Forecast percentile history: 1m granularity, standard weather percentiles.
 FORECAST_PERCENTILES = (10, 25, 50, 75, 90)
@@ -428,6 +429,32 @@ class KalshiClient:
             params.setdefault("percentiles", []).append(str(p))
         body = self._request("GET", path, params=params, budget="read")
         return body.get("forecast_history", [])
+
+    def get_market_trades(
+        self,
+        market_ticker: str,
+        close_at: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """All public trade prints for one market (API returns newest first).
+
+        Live:       /markets/trades
+        Historical: /historical/trades  — NOTE: unlike markets/candles the
+        historical path has NO /markets segment (verified 2026-08-12; both
+        endpoints accept ticker + limit/cursor and return `trades[]` with
+        *_dollars fixed-point strings).
+
+        Routing is by `close_at` (the market's close time) against the
+        cutoff: a market's whole print history lives on one side, so there
+        is no straddle case. Without close_at the live endpoint is used.
+        """
+        if close_at is not None and close_at.astimezone(UTC) <= self.historical_cutoff():
+            path = f"{HISTORICAL_PREFIX}/trades"
+        else:
+            path = "/markets/trades"
+        params = {"ticker": market_ticker}
+        return self._request_paged(
+            "GET", path, params, list_key="trades", limit=LIMIT_TRADES
+        )
 
     def get_series_fee_changes(
         self,
