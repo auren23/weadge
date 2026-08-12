@@ -19,6 +19,18 @@ Also recorded as a first-class negative result (checked 2026-08-12): all
 22,815 KXBTC15M events carry exactly ONE strike, so there is no intra-event
 ladder and no structural-arb direction on this series.
 
+RESULT (run 2026-08-12, 303,866 obs / 21,739 markets): NEGATIVE.
+  * Edge test: every phase x tau x side cell nets -0.9c..-5.6c after fees.
+  * Both models are miscalibrated the SAME way — realized YES sits below
+    p_end AND p_avg in every decile above 0.1 (e.g. p~0.97 -> realized
+    0.80) while the market's own mids are monthly-calibrated to +-0.9c.
+    A shared one-sided bias of this size is an INPUT problem, not a
+    variance-model problem: the Binance 1m proxy (basis vs the CFB RTI
+    settlement index) and/or trailing-60m sigma don't match what the
+    market prices. Conclusion: no modeling edge is claimable from Binance
+    1m data; this line needs the actual settlement index (or Kraken 1s)
+    before any re-test. Brier: p_end 0.20266, p_avg 0.20489.
+
 Discipline inherited from crypto_executability: spot bars are labeled by
 OPEN time and only closes with label + 60 <= t are usable
 (last_knowable_spot_idx); fills are next-bar opens and the fill bar must
