@@ -34,6 +34,10 @@ data/
 *.idx
 *.nc
 
+# ...except the small trimmed decode fixtures committed for offline tests
+!tests/fixtures/nbm/*.grib2
+!tests/fixtures/nbm/*.idx
+
 # ---- Secrets ----
 .env
 .env.*

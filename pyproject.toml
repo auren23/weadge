@@ -51,7 +51,7 @@ packages = ["src/weadge"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q -m \"not network\""
 asyncio_mode = "auto"
 markers = [
     "network: tests that hit live external APIs (not run by default)",
