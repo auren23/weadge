@@ -1,17 +1,27 @@
 """Kalshi 1-minute candlestick adapter -> quote_1m canonical frame.
 
-Verified wire shape (2026-08-11): candles carry `end_period_ts` (epoch s) —
-the bar's END — not start_ts. The bar bounds are therefore derived:
+Verified wire shape (2026-08-11, re-verified 2026-08-12): candles carry
+`end_period_ts` (epoch s) — the bar's END — not start_ts. The bar bounds
+are therefore derived:
 
     bar_end_at   = end_period_ts
-    bar_start_at = bar_end_at - period_interval_s
+    bar_start_at = bar_end_at - period_interval
     ts           = bar_start_at   (canonical bar-start timestamp)
+
+period_interval is in MINUTES (official valid values 1/60/1440), NOT
+seconds. Passing 60 fetches 60-MINUTE bars — a P0 unit bug (fixed
+2026-08-12): hourly bars were mislabeled as 1-minute bars (ts 59 min
+early) and every execution/delay semantic built on them was void.
 
 Bid/ask OHLC come back in two shapes that must both be parsed:
     live:        yes_ask = {close_dollars, high_dollars, low_dollars, open_dollars}
     historical:  yes_ask = {close, high, low, open}
 Both are dollar-denominated strings (e.g. "0.0300"). Volume arrives as
 `volume_fp` (live) or `volume` (historical), also a string.
+
+Thin books emit 1m bars only for minutes with quote activity (a 39h
+market returned ~1094 of 2340 possible 1m bars; gaps are multiples of
+60s) — sparsity is expected, never a fetch bug.
 """
 
 from __future__ import annotations
@@ -59,7 +69,7 @@ def candles_frame(
     end: datetime,
     *,
     series_ticker: str | None = None,
-    period_interval_s: int = 60,
+    period_interval_min: int = 1,
     save_raw: bool = False,
 ) -> pl.DataFrame:
     """Fetch 1-minute YES bid/ask OHLC candles for a market.
@@ -67,20 +77,21 @@ def candles_frame(
     Live candles need series_ticker (the live path is
     /series/{series}/markets/{ticker}/candlesticks); historical candles do
     not. The client routes by the historical cutoff automatically.
+    period_interval is in MINUTES (Kalshi official: 1/60/1440).
     """
     raw_rows = client.get_market_candles(
         market_ticker,
         series_ticker,
         start,
         end,
-        period_interval_s=period_interval_s,
+        period_interval_min=period_interval_min,
     )
     rows = []
     for c in raw_rows:
         bid_open, bid_high, bid_low, bid_close = _ohlc(c.get("yes_bid"))
         ask_open, ask_high, ask_low, ask_close = _ohlc(c.get("yes_ask"))
         bar_end = from_timestamp(int(c["end_period_ts"]))
-        bar_start = bar_end - timedelta(seconds=period_interval_s)
+        bar_start = bar_end - timedelta(minutes=period_interval_min)
         rows.append(
             {
                 "market_ticker": market_ticker,

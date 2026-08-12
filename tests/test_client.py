@@ -148,12 +148,12 @@ class TestCandleRouting:
                 "M1", "KXHIGHNY",
                 start=CUTOFF - timedelta(days=2),
                 end=CUTOFF - timedelta(days=1),
-                period_interval_s=60,
+                period_interval_min=1,
             )
         assert hist.called
         assert not live.called
         query = str(hist.calls[0].request.url)
-        assert "period_interval=60" in query
+        assert "period_interval=1" in query
         assert "start_ts" in query and "end_ts" in query
 
     @respx.mock
@@ -170,7 +170,7 @@ class TestCandleRouting:
                 "M1", "KXHIGHNY",
                 start=CUTOFF + timedelta(days=1),
                 end=CUTOFF + timedelta(days=2),
-                period_interval_s=60,
+                period_interval_min=1,
             )
         assert live.called
         assert not hist.called
@@ -470,7 +470,7 @@ class TestParsing:
         # the request carried repeated percentiles + int period_interval
         url = str(respx.calls[-1].request.url)
         assert "percentiles=10" in url and "percentiles=90" in url
-        assert "period_interval=60" in url
+        assert "period_interval=1" in url
 
     @respx.mock
     def test_forecast_percentile_microdegree_rescale(self) -> None:

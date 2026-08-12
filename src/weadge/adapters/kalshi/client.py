@@ -15,7 +15,9 @@ API contract notes (verified 2026-08-11 against the live API):
   * pagination is `limit` + `cursor` (events max 200, markets max 1000).
   * live candlesticks:  /series/{series}/markets/{ticker}/candlesticks
     historical:         /historical/markets/{ticker}/candlesticks
-    period_interval is an INTEGER number of seconds (60 = 1m).
+    period_interval is an INTEGER number of minutes (1/60/1440), not
+    seconds — the 2026-08-11 "60 = 1m" note was WRONG (60 = 60-minute
+    bars); fixed 2026-08-12 after empirical verification.
   * forecast percentile history:
     /series/{series}/events/{event}/forecast_percentile_history
     with repeated `percentiles` params + start_ts/end_ts/period_interval.
@@ -54,7 +56,7 @@ LIMIT_MARKETS = 1000
 
 # Forecast percentile history: 1m granularity, standard weather percentiles.
 FORECAST_PERCENTILES = (10, 25, 50, 75, 90)
-FORECAST_PERIOD_INTERVAL_S = 60
+FORECAST_PERIOD_INTERVAL_MIN = 1
 
 
 class KalshiError(RuntimeError):
@@ -369,13 +371,15 @@ class KalshiClient:
         series_ticker: str | None,
         start: datetime,
         end: datetime,
-        period_interval_s: int = 60,
+        period_interval_min: int = 1,
     ) -> list[dict[str, Any]]:
-        """1-minute YES bid/ask OHLC candles for one market.
+        """YES bid/ask OHLC candles for one market.
 
         Live:  /series/{series}/markets/{ticker}/candlesticks
         Historical: /historical/markets/{ticker}/candlesticks
-        `period_interval` is an integer number of seconds (60 = 1m).
+        `period_interval` is an integer number of MINUTES (official valid
+        values 1/60/1440) — NOT seconds. Verified 2026-08-12: pi=1 over
+        one hour returns per-minute bars, pi=60 returns hourly bars.
         """
         start = start.astimezone(UTC)
         end = end.astimezone(UTC)
@@ -391,7 +395,7 @@ class KalshiClient:
         params = {
             "start_ts": to_timestamp(start),
             "end_ts": to_timestamp(end),
-            "period_interval": period_interval_s,
+            "period_interval": period_interval_min,
         }
         body = self._request("GET", path, params=params, budget="read")
         return body.get("candlesticks", [])
@@ -403,20 +407,20 @@ class KalshiClient:
         start: datetime,
         end: datetime,
         percentiles: tuple[int, ...] = FORECAST_PERCENTILES,
-        period_interval_s: int = FORECAST_PERIOD_INTERVAL_S,
+        period_interval_min: int = FORECAST_PERIOD_INTERVAL_MIN,
     ) -> list[dict[str, Any]]:
         """Kalshi's own forecast percentile history for one event.
 
         Endpoint: /series/{series}/events/{event}/forecast_percentile_history
-        with repeated `percentiles` params and an integer period_interval
-        (seconds). Returns `forecast_history[]` — flattening happens in the
-        adapter layer.
+        with repeated `percentiles` params and an integer period_interval in
+        MINUTES (verified 2026-08-12). Returns `forecast_history[]` —
+        flattening happens in the adapter layer.
         """
         path = f"/series/{series_ticker}/events/{event_ticker}/forecast_percentile_history"
         params: dict[str, Any] = {
             "start_ts": to_timestamp(start),
             "end_ts": to_timestamp(end),
-            "period_interval": period_interval_s,
+            "period_interval": period_interval_min,
         }
         for p in percentiles:
             params.setdefault("percentiles", []).append(str(p))

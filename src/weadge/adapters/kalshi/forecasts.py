@@ -93,16 +93,20 @@ def forecast_percentile_frame(
     *,
     start: datetime,
     end: datetime,
-    period_interval_s: int = 60,
+    period_interval_min: int = 1,
     save_raw: bool = False,
 ) -> pl.DataFrame:
-    """Fetch forecast percentile history for one event's [start, end] window."""
+    """Fetch forecast percentile history for one event's [start, end] window.
+
+    period_interval is in MINUTES (verified 2026-08-12: pi=1 returns
+    per-minute forecast points, pi=60 hourly).
+    """
     raw_rows = client.get_event_forecast_percentile_history(
         event_ticker,
         series_ticker,
         start=start,
         end=end,
-        period_interval_s=period_interval_s,
+        period_interval_min=period_interval_min,
     )
     rows = [r for r in _flatten(raw_rows, event_ticker) if r["end_period_ts"] is not None]
     if save_raw and raw_rows:
