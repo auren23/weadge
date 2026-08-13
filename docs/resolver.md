@@ -16,8 +16,19 @@ PM Daily High 市场 + 机场站观测 → 找出"按结算规则已不可能"�
 - 结算延迟 2–4h（close → payout），规则锁定 ≠ 价格锁定
 - 结算站是机场 ASOS（巴黎 = LFPB / Bonneuil-en-France），零售锚定市中心读数
 
-**Kill test**：连续 10 个交易日扫描全部 LOCKED 信号，若零次出现
-"信号后 15 分钟内 NO ask ≥ 0.97 可成交" → hypothesis 死，转 V1 (NEAR_LOCKED)。
+**Kill test**：每次 bucket 首次进入 LOCKED 时，记录可执行 NO ask + depth，
+测量 CLOB 达到 0.97/0.99 所需时间。10 个交易日后输出：
+
+```text
+LOCK EVENTS: 74
+at lock: median NO ask 0.982 / p90 ...
+< 0.97: 7  events    < 0.95: 2    < 0.90: 0
+reaction to 0.97: median 41s / p90 126s
+executable $5: 6   executable $20: 2
+```
+
+若 LOCKED 时 NO ask 通常已 ≥ 0.99 → V0 死，转 V1 (NEAR_LOCKED)。
+`weadge stats` 直接输出该报告。
 
 ## 范围（V0 明确不做）
 
@@ -38,7 +49,12 @@ PM Daily High 市场 + 机场站观测 → 找出"按结算规则已不可能"�
 - bucket 语义：**向下取整** —— 读数 23.4°C → 23°C 桶；"be 33°C" 赢区间 [33, 34)
 - 巴黎结算源写死在市场规则：`wunderground.com/history/daily/fr/bonneuil-en-france/LFPB`
 - Weather taker fee 5%：`fee = C × 0.05 × p(1-p)`，极端价格 fee ≈ 0
-- 公共数据免凭证（gamma + aviationweather），只有下单要 key
+- 公共数据免凭证（gamma + aviationweather + CLOB /book），只有下单要 key
+- **gamma `outcomePrices` 只是展示价，不是可成交价**（实测巴黎 37°C 桶
+display 0.415/0.585 vs 真实 book 0.01/0.99）；`no_ask` 一律取 CLOB `/book`
+- gamma `clobTokenIds` 数组顺序不可靠（py-clob-client issue #276）——NO token
+  由 CLOB `/markets/{condition_id}` 的 tokens 节点权威解析，且只对 LOCKED
+  桶拉 book（省请求）
 
 ## 状态机（V0 只实现 LOCKED）
 
@@ -59,17 +75,27 @@ LOCKED ⟺ observed_max ≥ cap_high + locked_buffer_c   # buffer 防观测/结�
 
 ```text
 理论 NO 价 = 1.0（LOCKED）
+no_ask = CLOB /book 最优卖价（无 resting ask → 不可成交, 不产出 signal）
 fee = 0.05 × p_no × (1 - p_no)          # taker
 net_edge = 1.0 - no_ask - fee - exec_buffer
 signal ⟺ net_edge ≥ min_net_edge
 ```
 
+## 扫描与日志（service.py / log.py）
+
+- `weadge serve`：scan window 内每 30s 循环（V0 不需要 WS；
+  10 分钟粒度会直接测错反应延迟）
+- 每次扫描必写 heartbeat 行（scanner 存活 + observed 状态）
+- 每个 LOCKED 桶写 lock 行：`{ts, bucket, state, no_best_ask, no_ask_size, net_edge, signal}`
+- 无 signal 也记录 —— kill test 需要区分"没机会"与"scanner 没跑"
+- 日志是 stdlib JSONL（`resolver/log.py`），不依赖 live/recorder（recorder 挂了 bot 不能死）
+
 ## 模式（同一代码路径，最后一步不同）
 
 ```bash
-weadge resolver scan --mode shadow   # 记模拟成交（JSONL）
-weadge resolver scan --mode alert    # + Telegram（有 token 时）
-weadge resolver scan --mode trade    # v1+，当前 NotImplementedError
+weadge scan --mode shadow   # 记模拟成交（JSONL）
+weadge scan --mode alert    # + Telegram（有 token 时）
+weadge scan --mode trade    # v1+，当前 NotImplementedError
 ```
 
 ## 数据流
