@@ -1,5 +1,0 @@
-{"file": ".trellis/spec/resolver.md", "reason": "Resolver lane rules: LOCKED-only, no research import, new city = config + settlement check"}
-{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Reuse MetarClient, JsonlAppender, evaluate_observed; do not clone probe as a package"}
-{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Race JSONL / yaml fields are contracts; one decoder in the tool"}
-{"file": ".trellis/tasks/08-13-observation-race/research/feeds.md", "reason": "Verified AWC/IEM/WU endpoints, US IEM id mapping, PM city split"}
-{"file": "docs/resolver.md", "reason": "Strategy doc to update hypothesis and city policy without changing LOCKED"}
