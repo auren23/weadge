@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/resolver.md", "reason": "Confirm LOCKED / parser / 30s scan unchanged; NYC not a serve city"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Quality check entry (file is sparse; still the layer index target)"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "No duplicated METAR day-max or JSONL appenders"}
+{"file": ".trellis/tasks/08-13-observation-race/research/feeds.md", "reason": "External feed facts the implementation must not contradict"}
+{"file": "docs/resolver.md", "reason": "Hypothesis and out-of-scope must match code"}
