@@ -8,13 +8,14 @@ PM Daily High 市场 + 机场站观测 → 找出"按结算规则已不可能"�
 
 ## Hypothesis（V0 要验证的东西）
 
-**日高温达到后，PM 盘口对"已锁定 outcome"的反应存在可执行的滞后窗口。**
+**当 authoritative-enough observation 比市场价格更新早 0–2 分钟时，Daily High 市场存在可交易的 stale liquidity；该 edge 在约 5 分钟内快速衰减。**
 
-支撑结构：
+这是 `latency × measurement fidelity` 的微结构 alpha，不是天气预报。支撑结构：
 
 - 日高温通常在 local 14:00–17:00 达到，之后 losing buckets 应归零
 - 结算延迟 2–4h（close → payout），规则锁定 ≠ 价格锁定
-- 结算站是机场 ASOS（巴黎 = LFPB / Bonneuil-en-France），零售锚定市中心读数
+- 结算站是机场 ASOS + Wunderground Daily Observations 表（巴黎 = LFPB / Bonneuil-en-France）
+- 更快的 feed 不一定忠实于结算口径（整数 °C、不同 averaging、C→F roundtrip）
 
 **Kill test**：每次 bucket 首次进入 LOCKED 时，记录可执行 NO ask + depth，
 测量 CLOB 达到 0.97/0.99 所需时间。10 个交易日后输出：
@@ -38,7 +39,8 @@ executable $5: 6   executable $20: 2
 | Forecast (ECMWF/GFS) | V2，V0 失败才加 |
 | 自动下单 (trade mode) | 先 shadow → alert → trade |
 | Telegram 实际发送 | 无 token 不可测，留 stub |
-| 多城市 | 巴黎 LFPB 首发；同构扩展留给 shadow 跑通后 |
+| °F / `between X-Y°F` parser | NYC/Chicago 是 observation candidates，不是 trading candidates |
+| production scan 10s | 10s 只在 `tools/observation_race.py`；resolver 仍 30s |
 | Kalshi / 跨平台 | production 只接 PM |
 | 热端锁定（or-above 桶） | 无上限，依赖时间+斜率 = V1 |
 
@@ -48,6 +50,8 @@ executable $5: 6   executable $20: 2
 - 每温度桶一个二元市场（YES/NO），negRisk，同一事件内互斥
 - bucket 语义：**向下取整** —— 读数 23.4°C → 23°C 桶；"be 33°C" 赢区间 [33, 34)
 - 巴黎结算源写死在市场规则：`wunderground.com/history/daily/fr/bonneuil-en-france/LFPB`
+- 同构 °C serve 城市（规则已人工核对）：London EGLC、Tokyo RJTT、Seoul RKSI
+- NYC KLGA / Chicago KORD 结算为 °F + `between` 桶，只进 observation race / resolution audit，**不** `weadge serve`
 - Weather taker fee 5%：`fee = C × 0.05 × p(1-p)`，极端价格 fee ≈ 0
 - 公共数据免凭证（gamma + aviationweather + CLOB /book），只有下单要 key
 - **gamma `outcomePrices` 只是展示价，不是可成交价**（实测巴黎 37°C 桶
@@ -102,8 +106,8 @@ weadge scan --mode trade    # v1+，当前 NotImplementedError
 
 ```text
 gamma API (daily-temperature tag) ─┐
-aviationweather METAR (LFPB) ──────┼→ evaluate() → find_edges() → shadow/alert
-                                   └→ recorder（旁路，非依赖）
+aviationweather METAR (serve 30s) ─┼→ evaluate() → find_edges() → shadow/alert
+                                   └→ tools/observation_race.py（10s AWC+IEM；WU audit）
 ```
 
 `evaluate()` 是纯函数 —— 实时和历史 replay 走同一代码路径，不建框架。
@@ -117,6 +121,15 @@ aviationweather METAR (LFPB) ──────┼→ evaluate() → find_edges(
 | exec_buffer | 0.01 | 滑点/成交率缓冲 |
 | stale_after_min | 30 | 观测超过 30min 视为 stale，不发信号 |
 | scan_hours | 12:00–21:00 local | 扫描时间窗（日高温时段前后） |
+
+`cities` 是 serve 候选（paris/london/tokyo/seoul）。`observation_extra` 是 race/audit 专用（nyc/chicago），`weadge serve --city nyc` 会 KeyError。
+
+观测 race / WU audit：
+
+```bash
+uv run python tools/observation_race.py serve --interval 10
+uv run python tools/observation_race.py audit --backfill 7
+```
 
 ## 冻结线
 

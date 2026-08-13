@@ -10,7 +10,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = PROJECT_ROOT / "config"
@@ -79,7 +79,7 @@ class BacktestConfig(BaseModel):
 
 
 class ResolverCityConfig(BaseModel):
-    """Resolver city (PM daily-high market + observation station)."""
+    """PM daily-high station. `cities` are serve candidates; extras are race/audit only."""
 
     slug: str
     city: str
@@ -87,6 +87,12 @@ class ResolverCityConfig(BaseModel):
     timezone: str
     unit: str = "celsius"
     scan_hours: list[int] = [12, 21]
+    settlement_source: str = "wunderground"
+    settlement_url: str = ""
+    wu_location: str = ""
+    source_grade: str = "A"  # AWC vs this city's settlement; starting hypothesis
+    iem_network: str = ""
+    iem_station: str | None = None  # IEM current.py id; None → station_icao
 
 
 class ResolverEdgeConfig(BaseModel):
@@ -104,6 +110,7 @@ class ResolverTelegramConfig(BaseModel):
 class ResolverConfig(BaseModel):
     mode: str = "shadow"
     cities: list[ResolverCityConfig]
+    observation_extra: list[ResolverCityConfig] = Field(default_factory=list)
     edge: ResolverEdgeConfig = ResolverEdgeConfig()
     telegram: ResolverTelegramConfig = ResolverTelegramConfig()
 
@@ -112,6 +119,10 @@ class ResolverConfig(BaseModel):
             if c.slug == slug:
                 return c
         raise KeyError(f"resolver city {slug} not configured")
+
+    def observation_stations(self) -> list[ResolverCityConfig]:
+        """Serve cities plus race/audit-only extras (NYC/Chicago)."""
+        return [*self.cities, *self.observation_extra]
 
 
 class ResearchConfig(BaseModel):

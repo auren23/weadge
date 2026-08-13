@@ -1,4 +1,6 @@
 mode: shadow
+# cities = resolver serve candidates (isomorphic °C Daily High).
+# observation_extra = race/audit only; not weadge serve (no °F/between parser yet).
 cities:
 - slug: paris
   city: Paris
@@ -8,6 +10,79 @@ cities:
   scan_hours:
   - 12
   - 21
+  settlement_source: wunderground
+  settlement_url: https://www.wunderground.com/history/daily/fr/bonneuil-en-france/LFPB
+  wu_location: LFPB:9:FR
+  source_grade: A
+  iem_network: FR__ASOS
+- slug: london
+  city: London
+  station_icao: EGLC
+  timezone: Europe/London
+  unit: celsius
+  scan_hours:
+  - 12
+  - 21
+  settlement_source: wunderground
+  settlement_url: https://www.wunderground.com/history/daily/gb/london/EGLC
+  wu_location: EGLC:9:GB
+  source_grade: A
+  iem_network: GB__ASOS
+- slug: tokyo
+  city: Tokyo
+  station_icao: RJTT
+  timezone: Asia/Tokyo
+  unit: celsius
+  scan_hours:
+  - 12
+  - 21
+  settlement_source: wunderground
+  settlement_url: https://www.wunderground.com/history/daily/jp/tokyo/RJTT
+  wu_location: RJTT:9:JP
+  source_grade: A
+  iem_network: JP__ASOS
+- slug: seoul
+  city: Seoul
+  station_icao: RKSI
+  timezone: Asia/Seoul
+  unit: celsius
+  scan_hours:
+  - 12
+  - 21
+  settlement_source: wunderground
+  settlement_url: https://www.wunderground.com/history/daily/kr/incheon/RKSI
+  wu_location: RKSI:9:KR
+  source_grade: A
+  iem_network: KR__ASOS
+observation_extra:
+- slug: nyc
+  city: NYC
+  station_icao: KLGA
+  timezone: America/New_York
+  unit: fahrenheit
+  scan_hours:
+  - 12
+  - 21
+  settlement_source: wunderground
+  settlement_url: https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA
+  wu_location: KLGA:9:US
+  source_grade: B
+  iem_network: NY_ASOS
+  iem_station: LGA
+- slug: chicago
+  city: Chicago
+  station_icao: KORD
+  timezone: America/Chicago
+  unit: fahrenheit
+  scan_hours:
+  - 12
+  - 21
+  settlement_source: wunderground
+  settlement_url: https://www.wunderground.com/history/daily/us/il/chicago/KORD
+  wu_location: KORD:9:US
+  source_grade: B
+  iem_network: IL_ASOS
+  iem_station: ORD
 edge:
   min_net_edge: 0.02
   exec_buffer: 0.01
