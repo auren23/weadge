@@ -127,11 +127,16 @@ aviationweather METAR (serve 30s) ─┼→ evaluate() → find_edges() → shad
 观测 race / WU audit：
 
 ```bash
-uv run python tools/observation_race.py serve --interval 10
-uv run python tools/observation_race.py audit --backfill 7
+uv run python tools/observation_race.py serve --interval 10   # long-running
+uv run python tools/observation_race.py audit --backfill 7    # daily / on demand
 ```
+
+当前要攒的证据只有三类：`(1) latency` observation_at → first_seen_at；`(2) fidelity` METAR → WU resolution；`(3) market reaction` LOCKED first_seen → PM book repricing。目标是按城得到 Source latency / Exact match / LOCK stale，再决定交易哪个城、信哪个 feed、需要多快。
+
+**数据冻结：** 除修 P0 数据错误 / 进程故障外，在拿到第一批有效 race + audit 样本前，不改策略代码。禁止在此之前做 V1、forecast、trade、NYC/Chicago parser。
 
 ## 冻结线
 
 Research v1（price-bin / stale-book / lead-lag / coherence arb / cheap YES /
 multi-city forecast）FROZEN。未来 90 天 Weadge 只允许增加 resolver 所需代码。
+当前阶段连 resolver 策略也不改，直到 race/audit 样本说话。

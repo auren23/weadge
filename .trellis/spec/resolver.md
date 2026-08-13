@@ -15,6 +15,7 @@ Weadge 唯一活跃 production 主线（research v1 FROZEN）。
 - serve 城市 = 与 Paris 同构的 °C Daily High + 人工核对结算站（PM `resolutionSource`）
 - 观测候选可以更宽（NYC/Chicago 进 `observation_extra` / race+audit，不进 `weadge serve`）
 - production scan 保持 30s；10s 轮询只存在于 `tools/observation_race.py`
+- **数据冻结：** 除 P0 数据错误/进程故障外，第一批有效 race+audit 样本到来前不改策略代码（无 V1 / forecast / trade / °F parser）
 
 ## Scenario: observation race + WU audit
 
