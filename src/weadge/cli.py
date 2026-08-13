@@ -11,7 +11,7 @@
     weadge backtest taker --series KXHIGHNY --model p_nbm --edge 0.06
 
 v0 commands that need downloaded data raise a clear error when the lake is
-empty — the pipeline order (data -> settlement -> dataset -> research) is
+empty -- the pipeline order (data -> settlement -> dataset -> research) is
 enforced by the gates, not by the CLI.
 """
 
@@ -274,10 +274,10 @@ def noaa_backfill_nbm(
     """Backfill NBM MaxT QMD distributions (AWS archive) for each target date.
 
     Per target date D: the D-00Z run's f030 (day-1, window [D 12Z, D+1 06Z))
-    and the (D-1)-00Z run's f054 (day-2 — the SAME window, knowable 24h
+    and the (D-1)-00Z run's f054 (day-2 -- the SAME window, knowable 24h
     earlier, which is what makes the T-24h snapshot covered). availability
     = observed S3 Last-Modified. The NBM window differs from the DCR
-    settlement day — recorded, not aligned.
+    settlement day -- recorded, not aligned.
     """
     from datetime import date
 
@@ -502,7 +502,7 @@ app.add_typer(live_app, name="live")
 
 @live_app.command("record")
 def live_record(series: _series_opt) -> None:
-    """Start the real-time recorder (v2 — not available in v0)."""
+    """Start the real-time recorder (v2 -- not available in v0)."""
     import asyncio
 
     from weadge.adapters.kalshi.websocket import KalshiWebSocket
@@ -512,6 +512,22 @@ def live_record(series: _series_opt) -> None:
         asyncio.run(ws.connect(series))
     except NotImplementedError as exc:
         raise SystemExit(str(exc)) from None
+
+
+# ---------------------------------------------------------------- resolver
+resolver_app = typer.Typer(help="Resolver — Observation-Locked Scanner (docs/resolver.md).", no_args_is_help=True)
+app.add_typer(resolver_app, name="resolver")
+
+
+@resolver_app.command("scan")
+def resolver_scan(
+    city: Annotated[str, typer.Option("--city", help="city slug from config/resolver.yaml")] = "paris",
+    mode: Annotated[str, typer.Option("--mode", help="shadow | alert | trade(v1+)")] = "shadow",
+) -> None:
+    """Run one resolver scan (shadow/alert)."""
+    from weadge.resolver.service import scan
+
+    scan(city, mode)
 
 
 def _load_gold(series: str) -> pl.DataFrame:

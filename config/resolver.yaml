@@ -1,0 +1,18 @@
+mode: shadow
+cities:
+- slug: paris
+  city: Paris
+  station_icao: LFPB
+  timezone: Europe/Paris
+  unit: celsius
+  scan_hours:
+  - 12
+  - 21
+edge:
+  min_net_edge: 0.02
+  exec_buffer: 0.01
+  locked_buffer_c: 0.5
+  stale_after_min: 30
+telegram:
+  bot_token_env: TELEGRAM_BOT_TOKEN
+  chat_id_env: TELEGRAM_CHAT_ID

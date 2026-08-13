@@ -78,6 +78,42 @@ class BacktestConfig(BaseModel):
     bootstrap: dict = {}
 
 
+class ResolverCityConfig(BaseModel):
+    """Resolver city (PM daily-high market + observation station)."""
+
+    slug: str
+    city: str
+    station_icao: str
+    timezone: str
+    unit: str = "celsius"
+    scan_hours: list[int] = [12, 21]
+
+
+class ResolverEdgeConfig(BaseModel):
+    min_net_edge: float = 0.02
+    exec_buffer: float = 0.01
+    locked_buffer_c: float = 0.5
+    stale_after_min: int = 30
+
+
+class ResolverTelegramConfig(BaseModel):
+    bot_token_env: str = "TELEGRAM_BOT_TOKEN"
+    chat_id_env: str = "TELEGRAM_CHAT_ID"
+
+
+class ResolverConfig(BaseModel):
+    mode: str = "shadow"
+    cities: list[ResolverCityConfig]
+    edge: ResolverEdgeConfig = ResolverEdgeConfig()
+    telegram: ResolverTelegramConfig = ResolverTelegramConfig()
+
+    def by_slug(self, slug: str) -> ResolverCityConfig:
+        for c in self.cities:
+            if c.slug == slug:
+                return c
+        raise KeyError(f"resolver city {slug} not configured")
+
+
 class ResearchConfig(BaseModel):
     dataset: dict = {}
     research: dict = {}
@@ -102,6 +138,13 @@ def load_models(path: Path | None = None) -> ModelsConfig:
 def load_research(path: Path | None = None) -> ResearchConfig:
     with open(path or CONFIG_DIR / "research.yaml") as fh:
         return ResearchConfig.model_validate(yaml.safe_load(fh))
+
+
+@lru_cache(maxsize=1)
+def load_resolver(path: Path | None = None) -> ResolverConfig:
+    """Resolver config (docs/resolver.md). Independent of research config."""
+    with open(path or CONFIG_DIR / "resolver.yaml") as fh:
+        return ResolverConfig.model_validate(yaml.safe_load(fh))
 
 
 def data_root() -> Path:
