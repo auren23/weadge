@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from weadge.resolver.edge import find_edges, taker_fee
-from weadge.resolver.markets import bucket_cap_high, parse_event
+from weadge.resolver.markets import Book, bucket_cap_high, parse_event
 from weadge.resolver.observations import ObservedState, evaluate_observed
 from weadge.resolver.state import ResolutionState, evaluate_event
 
@@ -39,8 +39,10 @@ def test_parse_event(paris_event):
     # 首个桶 "32°C or below" -> cap 33.0; 末端 "37°C" -> cap 38.0
     assert paris_event.buckets[0].cap_high == 33.0
     assert paris_event.buckets[-1].cap_high == 38.0
-    assert all(0.0 <= b.no_price <= 1.0 for b in paris_event.buckets)
-    assert paris_event.buckets[0].clob_token_ids  # negRisk 合约有 token id
+    # token id 不随 gamma 预解析 —— 由 CLOB /markets/{cid} 权威解析 (顺序不可靠, issue #276)
+    assert paris_event.buckets[0].no_token_id == ""
+    assert paris_event.buckets[0].condition_id.startswith("0x")
+    assert paris_event.buckets[0].label == "32°C or below"
 
 
 # --------------------------------------------------------------- observations
@@ -103,30 +105,40 @@ def test_locked_buffer_respects_settlement_deviation(paris_event):
 
 # --------------------------------------------------------------- edge
 
+def _book(no_ask: float | None, size: float = 100.0) -> Book:
+    return Book(token_id="t", best_ask=no_ask, best_ask_size=size, ts=datetime(2026, 8, 13, 14, 0, tzinfo=UTC))
+
+
 def test_find_edges(paris_event):
     obs = _afternoon_obs([_metar_row(14, 34.5)])
     bucket_states = evaluate_event(paris_event.buckets, obs)
-    # 把 "33°C" 桶盘口改成 NO@0.94: 理论 1.0, fee≈0.0028, exec 0.01 -> edge≈0.047
-    cheap = next(bs for bs in bucket_states if bs.bucket.cap_high == 34.0)
-    priced = cheap.bucket.model_copy(update={"no_price": 0.94})
-    bucket_states = [
-        type(cheap)(priced, cheap.state) if bs.bucket.cap_high == 34.0 else bs for bs in bucket_states
-    ]
-    signals = find_edges("Paris", paris_event.target_date, bucket_states, obs, min_net_edge=0.02)
+    locked = [bs for bs in bucket_states if bs.bucket.cap_high in (33.0, 34.0)]
+    # "33°C" 桶 (cap 34.0) 可执行 NO@0.94: 理论 1.0, fee≈0.0028, exec 0.01 -> edge≈0.047
+    books = {bs.bucket.market_id: _book(0.94) if bs.bucket.cap_high == 34.0 else _book(None) for bs in locked}
+    assessments = find_edges(bucket_states, books, min_net_edge=0.02)
+    signals = [a for a in assessments if a.signal]
     assert len(signals) == 1
     s = signals[0]
     assert s.bucket.cap_high == 34.0
+    assert s.no_ask == 0.94
+    assert s.no_ask_size == 100.0
     assert abs(s.fee - taker_fee(0.94)) < 1e-9
     assert abs(s.net_edge - (1.0 - 0.94 - taker_fee(0.94) - 0.01)) < 1e-9
     assert s.net_edge >= 0.02
+    # 无 resting ask 的 LOCKED 桶也返回评估 (untradeable) —— kill test 需要看见它
+    untradeable = [a for a in assessments if a.no_ask is None]
+    assert len(untradeable) == 1 and untradeable[0].signal is False
 
 
 def test_find_edges_no_signal_when_price_fair(paris_event):
     obs = _afternoon_obs([_metar_row(14, 34.5)])
     bucket_states = evaluate_event(paris_event.buckets, obs)
-    # 盘口已反应 (NO@0.99): fee≈0.0005, edge≈-0.0005 < 0.02 -> 无信号
-    signals = find_edges("Paris", paris_event.target_date, bucket_states, obs, min_net_edge=0.02)
-    assert signals == []
+    locked = [bs for bs in bucket_states if bs.bucket.cap_high in (33.0, 34.0)]
+    # 盘口已反应 (NO@0.99): fee≈0.0005, edge≈-0.0005 < 0.02 -> 无 signal
+    books = {bs.bucket.market_id: _book(0.99) for bs in locked}
+    assessments = find_edges(bucket_states, books, min_net_edge=0.02)
+    assert all(not a.signal for a in assessments)
+    assert len(assessments) == 2  # 评估仍被产出 (kill test 需要 lock 记录)
 
 
 def test_taker_fee_extremes():

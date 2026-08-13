@@ -1,12 +1,16 @@
-"""Resolver service - shadow scan orchestration.
+"""Resolver service - scan orchestration (shadow/alert), serve loop, kill-test stats.
 
-    live data -> evaluate() -> find_edges() -> shadow record / alert
+    live data -> evaluate() -> executable book -> assess -> log + alert
 
-evaluate() is a pure function; live and historical replay share the same path.
+evaluate()/find_edges() are pure; live and replay share the same path.
+Every scan writes a heartbeat row; every LOCKED bucket writes a lock row
+with the executable book snapshot - this is what the V0 kill test measures.
 """
 
 from __future__ import annotations
 
+import time
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from rich.console import Console
@@ -20,11 +24,11 @@ from weadge.config import (
     load_resolver,
 )
 from weadge.domain.time import utc_now
-from weadge.live.recorder import JsonlZstAppender
-from weadge.resolver.edge import Signal, find_edges
-from weadge.resolver.markets import DailyHighEvent, PMClient
-from weadge.resolver.observations import MetarClient, ObservedState, evaluate_observed
-from weadge.resolver.state import evaluate_event
+from weadge.resolver.edge import LockAssessment, find_edges
+from weadge.resolver.log import JsonlAppender
+from weadge.resolver.markets import ClobClient, PMClient
+from weadge.resolver.observations import MetarClient, evaluate_observed
+from weadge.resolver.state import ResolutionState, evaluate_event
 
 console = Console()
 MODES = ("shadow", "alert", "trade")
@@ -51,7 +55,7 @@ class TelegramNotifier:
         )
 
 
-def _today_event(events: list[DailyHighEvent], tz: ZoneInfo) -> DailyHighEvent | None:
+def _today_event(events, tz: ZoneInfo):
     """Event for today in station-local time; None if not listed yet."""
     local_today = utc_now().astimezone(tz).date()
     for e in events:
@@ -65,34 +69,43 @@ def _in_scan_window(tz: ZoneInfo, scan_hours: list[int]) -> bool:
     return scan_hours[0] <= local_hour < scan_hours[1]
 
 
-def _record(recorder: JsonlZstAppender, signal: Signal) -> None:
-    recorder.append(
-        utc_now().isoformat(),
-        {
-            "mode": "shadow",
-            "city": signal.city,
-            "target_date": signal.target_date.isoformat(),
-            "market_id": signal.bucket.market_id,
-            "question": signal.bucket.question,
-            "no_ask": signal.no_ask,
-            "fee": signal.fee,
-            "net_edge": signal.net_edge,
-        },
-    )
+def _lock_row(ts: str, city: str, station: str, a: LockAssessment, signal: bool) -> dict:
+    return {
+        "event": "lock",
+        "ts": ts,
+        "city": city,
+        "station": station,
+        "bucket": a.bucket.label,
+        "market_id": a.bucket.market_id,
+        "state": a.state.value,
+        "no_best_ask": a.no_ask,
+        "no_ask_size": a.no_ask_size,
+        "book_ts": a.book_ts.isoformat() if a.book_ts else None,
+        "net_edge": a.net_edge,
+        "signal": signal,
+    }
 
 
-def _render(signals: list[Signal], obs: ObservedState) -> None:
-    table = Table(title=f"resolver shadow — {obs.station} max={obs.observed_max_c}C (stale={obs.stale})")
+def _render(signals, station: str, observed_max: float | None) -> None:
+    table = Table(title=f"resolver — {station} max={observed_max}C")
     table.add_column("bucket")
     table.add_column("no_ask")
+    table.add_column("size")
     table.add_column("fee")
     table.add_column("net_edge")
     for s in signals:
-        table.add_row(s.bucket.question[:40], f"{s.no_ask:.4f}", f"{s.fee:.4f}", f"{s.net_edge:.4f}")
+        table.add_row(
+            s.bucket.label,
+            f"{s.no_ask:.4f}",
+            f"{s.no_ask_size:.1f}",
+            f"{s.fee:.4f}",
+            f"{s.net_edge:.4f}",
+        )
     console.print(table)
 
 
 def scan(city_slug: str, mode: str, cfg: ResolverConfig | None = None) -> None:
+    """One scan: events -> observations -> LOCKED -> executable book -> log/alert."""
     if mode not in MODES:
         raise SystemExit(f"mode must be one of {MODES}")
     if mode == "trade":
@@ -103,42 +116,158 @@ def scan(city_slug: str, mode: str, cfg: ResolverConfig | None = None) -> None:
     tz = ZoneInfo(city.timezone)
 
     if not _in_scan_window(tz, city.scan_hours):
-        console.print(f"[dim]outside scan window ({city.scan_hours}) — skip[/dim]")
         return
 
-    with PMClient() as pm, MetarClient() as metar:
-        events = pm.fetch_daily_high(city.slug)
-        event = _today_event(events, tz)
-        if event is None:
-            console.print("[dim]no daily-high event for today — skip[/dim]")
-            return
-        rows = metar.fetch(city.station_icao)
-        obs = evaluate_observed(city.station_icao, rows, tz, stale_after_min=edge.stale_after_min)
+    log = JsonlAppender(data_root() / "resolver", prefix=f"shadow-{city.slug}")
+    try:
+        with PMClient() as pm, MetarClient() as metar, ClobClient() as clob:
+            events = pm.fetch_daily_high(city.slug)
+            event = _today_event(events, tz)
+            if event is None:
+                return
+            rows = metar.fetch(city.station_icao)
+            obs = evaluate_observed(city.station_icao, rows, tz, stale_after_min=edge.stale_after_min)
 
-    if obs.stale:
-        console.print(f"[yellow]observation stale ({obs.ts}) — no signal[/yellow]")
-        return
+            if obs.stale:
+                log.append(
+                    {
+                        "event": "heartbeat",
+                        "ts": utc_now().isoformat(),
+                        "city": city.city,
+                        "station": city.station_icao,
+                        "observed_max": obs.observed_max_c,
+                        "observation_ts": obs.ts.isoformat(),
+                        "stale": True,
+                        "locked_count": 0,
+                        "signal_count": 0,
+                    }
+                )
+                console.print(f"[yellow]observation stale ({obs.ts}) — heartbeat only[/yellow]")
+                return
 
-    bucket_states = evaluate_event(event.buckets, obs, locked_buffer_c=edge.locked_buffer_c)
-    signals = find_edges(
-        city.city,
-        event.target_date,
-        bucket_states,
-        obs,
-        min_net_edge=edge.min_net_edge,
-        exec_buffer=edge.exec_buffer,
-    )
+            bucket_states = evaluate_event(event.buckets, obs, locked_buffer_c=edge.locked_buffer_c)
+            locked = [bs for bs in bucket_states if bs.state is ResolutionState.LOCKED]
 
-    if not signals:
-        console.print("[dim]no LOCKED edge — clean[/dim]")
-        return
+            # executable book only for LOCKED buckets (token via authoritative /markets/{cid})
+            books: dict[str, object] = {}
+            for bs in locked:
+                token = clob.resolve_no_token(bs.bucket.condition_id)
+                if token:
+                    books[bs.bucket.market_id] = clob.fetch_book(token)
 
-    recorder = JsonlZstAppender(data_root() / "resolver", f"shadow-{city.slug}")
-    for s in signals:
-        _record(recorder, s)
-    _render(signals, obs)
+            assessments = find_edges(
+                bucket_states,
+                books,  # type: ignore[arg-type]
+                min_net_edge=edge.min_net_edge,
+                exec_buffer=edge.exec_buffer,
+            )
+            signals = [a for a in assessments if a.signal]
 
-    if mode == "alert":
-        TelegramNotifier(cfg).send(
-            "\n".join(f"{s.bucket.question} NO@{s.no_ask:.3f} edge={s.net_edge:.3f}" for s in signals)
+        now_iso = utc_now().isoformat()
+        log.append(
+            {
+                "event": "heartbeat",
+                "ts": now_iso,
+                "city": city.city,
+                "station": city.station_icao,
+                "observed_max": obs.observed_max_c,
+                "observation_ts": obs.ts.isoformat(),
+                "stale": False,
+                "locked_count": len(locked),
+                "signal_count": len(signals),
+            }
         )
+        for a in assessments:
+            log.append(_lock_row(now_iso, city.city, city.station_icao, a, signal=a.signal))
+    finally:
+        log.close()
+
+    if signals:
+        _render(signals, city.station_icao, obs.observed_max_c)
+        if mode == "alert":
+            TelegramNotifier(cfg).send(
+                "\n".join(f"{s.bucket.label} NO@{s.no_ask:.3f} edge={s.net_edge:.3f}" for s in signals)
+            )
+
+
+def serve(city_slug: str, mode: str, interval_s: int = 30) -> None:
+    """Loop scan every interval_s within the scan window (no WS needed for V0)."""
+    cfg = load_resolver()
+    city = cfg.by_slug(city_slug)
+    console.print(f"[dim]resolver serve — {city.city} every {interval_s}s (window {city.scan_hours})[/dim]")
+    while True:
+        started = time.monotonic()
+        try:
+            scan(city_slug, mode, cfg)
+        except Exception as exc:
+            console.print(f"[red]scan error: {exc}[/red]")
+        elapsed = time.monotonic() - started
+        time.sleep(max(1, interval_s - elapsed))
+
+
+def stats(city_slug: str, root=None, min_net_edge: float = 0.02) -> None:
+    """Kill-test summary from shadow logs: lock events, ask at lock, reaction latency."""
+    import json
+    import statistics
+
+    root = root or data_root() / "resolver"
+    first_lock: dict[str, dict] = {}     # market_id -> first lock row
+    ask_series: dict[str, list[tuple[str, float | None]]] = {}
+
+    for f in sorted(root.glob(f"shadow-{city_slug}-*.jsonl")):
+        with open(f) as fh:
+            for line in fh:
+                row = json.loads(line)
+                if row.get("event") != "lock":
+                    continue
+                mid = row["market_id"]
+                if mid not in first_lock:
+                    first_lock[mid] = row
+                ask_series.setdefault(mid, []).append((row["ts"], row["no_best_ask"]))
+
+    if not first_lock:
+        console.print("[dim]no lock events yet — keep scanning[/dim]")
+        return
+
+    lock_asks = [r["no_best_ask"] for r in first_lock.values() if r["no_best_ask"] is not None]
+    cheap = {mid: r for mid, r in first_lock.items() if r["no_best_ask"] is not None and r["no_best_ask"] < 0.97}
+    exec5 = [r for r in first_lock.values() if (r["no_ask_size"] or 0) >= 5 and (r["net_edge"] or 0) >= min_net_edge]
+    exec20 = [r for r in first_lock.values() if (r["no_ask_size"] or 0) >= 20 and (r["net_edge"] or 0) >= min_net_edge]
+
+    def reaction(threshold: float) -> list[float]:
+        out = []
+        for mid, rows in ask_series.items():
+            if mid not in cheap:
+                continue
+            lock_ts = first_lock[mid]["ts"]
+            for ts, ask in rows:
+                if ask is not None and ask >= threshold and ts > lock_ts:
+                    t0 = datetime.fromisoformat(lock_ts)
+                    t1 = datetime.fromisoformat(ts)
+                    out.append((t1 - t0).total_seconds())
+                    break
+        return out
+
+    def pct(vals: list[float], q: float) -> float | None:
+        return statistics.quantiles(sorted(vals), n=100)[int(q) - 1] if vals else None
+
+    r97 = reaction(0.97)
+    table = Table(title=f"resolver stats — {city_slug} ({len(first_lock)} lock events)")
+    table.add_column("metric")
+    table.add_column("value")
+    rows = [
+        ("LOCK EVENTS (first lock per bucket)", str(len(first_lock))),
+        ("at lock: median NO ask", f"{pct(lock_asks, 50):.4f}" if lock_asks else "-"),
+        ("at lock: p90 NO ask", f"{pct(lock_asks, 90):.4f}" if lock_asks else "-"),
+        ("lock ask < 0.97", str(len(cheap))),
+        ("lock ask < 0.95", str(sum(1 for a in lock_asks if a < 0.95))),
+        ("lock ask < 0.90", str(sum(1 for a in lock_asks if a < 0.90))),
+        ("reaction to 0.97: median s", f"{pct(r97, 50):.0f}" if r97 else "-"),
+        ("reaction to 0.97: p90 s", f"{pct(r97, 90):.0f}" if r97 else "-"),
+        ("reaction to 0.99: median s", f"{pct(reaction(0.99), 50):.0f}" if reaction(0.99) else "-"),
+        ("executable $5 at lock", str(len(exec5))),
+        ("executable $20 at lock", str(len(exec20))),
+    ]
+    for k, v in rows:
+        table.add_row(k, str(v))
+    console.print(table)

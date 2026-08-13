@@ -1,57 +1,68 @@
-"""PM Daily High market discovery and normalization (gamma API).
+"""PM Daily High market discovery and normalization (gamma + CLOB API).
 
 Verified facts (2026-08-13):
 - event: highest-temperature-in-paris-on-2026-08-13, tag `daily-temperature`
 - one binary market (YES/NO) per temperature bucket, negRisk, mutually exclusive
 - bucket win range: "be 33C" = [33, 34); "be 32C or below" = (-inf, 33); "or above" = [X, inf)
 - Paris resolution station is fixed in the rules: wunderground.com/history/daily/fr/bonneuil-en-france/LFPB
+- gamma `clobTokenIds` array order is NOT reliable (issue py-clob-client#276);
+  resolve token ids via CLOB `/markets/{condition_id}` tokens node instead
+- gamma `outcomePrices` is display/mid pricing, NOT executable:
+  Paris 37C bucket showed 0.415/0.585 while the real book was 0.01/0.99.
+  executable ask must come from `/book`
 - public market data needs no credentials"""
 
 from __future__ import annotations
 
-from dataclasses import field
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
 import httpx
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel
 
-from weadge.domain.time import parse_iso
+from weadge.domain.time import from_timestamp, parse_iso
 
 GAMMA_API = "https://gamma-api.polymarket.com"
+CLOB_API = "https://clob.polymarket.com"
 DAILY_TEMP_TAG = "daily-temperature"
 
 
 class Bucket(BaseModel):
-    """一个温度桶的二元市场(clob 合约)。"""
+    """One temperature-bucket binary market (CLOB contract)."""
 
     market_id: str
     question: str
-    clob_token_ids: list[str] = []
-    cap_high: float | None        # 赢区间 [cap_low, cap_high); None = or-above 桶(无上限)
-    yes_price: float = 0.0
-    no_price: float = 0.0
+    condition_id: str = ""
+    cap_high: float | None        # win range [cap_low, cap_high); None = or-above (no cap)
+    no_token_id: str = ""         # resolved via /markets/{condition_id}; "" until fetched
 
-    @field_validator("yes_price", "no_price")
-    @classmethod
-    def _pct(cls, v: float) -> float:
-        if not 0.0 <= v <= 1.0:
-            raise ValueError(f"price out of range: {v}")
-        return v
+    @property
+    def label(self) -> str:
+        return self.question.split(" be ")[1].split(" on ")[0] if " be " in self.question else self.question
 
 
 class DailyHighEvent(BaseModel):
-    """一天一个城市的全部温度桶市场。"""
+    """All temperature buckets for one city-day."""
 
     slug: str
     city: str
     target_date: date
     buckets: list[Bucket] = field(default_factory=list)  # type: ignore[assignment]
 
+
+@dataclass(frozen=True)
+class Book:
+    """Executable top-of-book for one token."""
+
+    token_id: str
+    best_ask: float | None      # None = no ask (cannot taker-buy)
+    best_ask_size: float = 0.0
+    ts: Any = None              # book timestamp (ms epoch)
+
     @property
-    def highest_cap(self) -> float | None:
-        caps = [b.cap_high for b in self.buckets if b.cap_high is not None]
-        return max(caps) if caps else None
+    def has_ask(self) -> bool:
+        return self.best_ask is not None
 
 
 def bucket_cap_high(question: str) -> float | None:
@@ -72,31 +83,25 @@ def bucket_cap_high(question: str) -> float | None:
 
 
 def parse_event(payload: dict[str, Any], city: str) -> DailyHighEvent:
-    """gamma /events 单事件 JSON -> DailyHighEvent。纯函数。"""
-    import json
+    """gamma /events single event JSON -> DailyHighEvent. Pure."""
 
     slug = payload["slug"]
     target_date = parse_iso(payload["endDate"]).date()
     buckets: list[Bucket] = []
     for m in payload.get("markets") or []:
-        outcomes = json.loads(m.get("outcomes") or "[]")
-        prices = json.loads(m.get("outcomePrices") or "[]")
-        yes_idx = outcomes.index("Yes")
         buckets.append(
             Bucket(
                 market_id=str(m["id"]),
                 question=m.get("question") or "",
-                clob_token_ids=list(m.get("clobTokenIds") or []),
+                condition_id=m.get("conditionId") or "",
                 cap_high=bucket_cap_high(m.get("question") or ""),
-                yes_price=float(prices[yes_idx]),
-                no_price=float(prices[1 - yes_idx]),
             )
         )
     return DailyHighEvent(slug=slug, city=city, target_date=target_date, buckets=buckets)
 
 
 class PMClient:
-    """gamma API 只读客户端(公共数据, 免凭证)。"""
+    """gamma API read-only client (public data, no credentials)."""
 
     def __init__(self, base: str = GAMMA_API, timeout: float = 15.0) -> None:
         self._client = httpx.Client(base_url=base, timeout=timeout)
@@ -111,7 +116,7 @@ class PMClient:
         self.close()
 
     def fetch_daily_high(self, city: str, limit: int = 200) -> list[DailyHighEvent]:
-        """拉取指定城市全部未关闭的 daily-high 事件(按 slug 前缀过滤)。"""
+        """All unclosed daily-high events for a city (slug prefix filter)."""
         resp = self._client.get(
             "/events",
             params={"tag_slug": DAILY_TEMP_TAG, "closed": "false", "limit": limit},
@@ -123,3 +128,44 @@ class PMClient:
             for e in resp.json()
             if isinstance(e, dict) and e.get("slug", "").startswith(prefix)
         ]
+
+
+class ClobClient:
+    """CLOB read-only client (public book/tokens data, no credentials)."""
+
+    def __init__(self, base: str = CLOB_API, timeout: float = 15.0) -> None:
+        self._client = httpx.Client(base_url=base, timeout=timeout)
+
+    def close(self) -> None:
+        self._client.close()
+
+    def __enter__(self) -> ClobClient:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def resolve_no_token(self, condition_id: str) -> str:
+        """NO token id via /markets/{condition_id} tokens node (authoritative)."""
+        if not condition_id:
+            return ""
+        resp = self._client.get(f"/markets/{condition_id}")
+        resp.raise_for_status()
+        for t in resp.json().get("tokens") or []:
+            if t.get("outcome") == "No":
+                return t["token_id"]
+        return ""
+
+    def fetch_book(self, token_id: str) -> Book:
+        """Top of book for a token; best_ask None when no ask is resting."""
+        resp = self._client.get("/book", params={"token_id": token_id})
+        resp.raise_for_status()
+        data = resp.json()
+        asks = data.get("asks") or []
+        best = asks[0] if asks else None
+        return Book(
+            token_id=token_id,
+            best_ask=float(best["price"]) if best else None,
+            best_ask_size=float(best["size"]) if best else 0.0,
+            ts=from_timestamp(int(data["timestamp"])) if data.get("timestamp") else None,
+        )
