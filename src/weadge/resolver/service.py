@@ -69,12 +69,13 @@ def _in_scan_window(tz: ZoneInfo, scan_hours: list[int]) -> bool:
     return scan_hours[0] <= local_hour < scan_hours[1]
 
 
-def _lock_row(ts: str, city: str, station: str, a: LockAssessment, signal: bool) -> dict:
+def _lock_row(ts: str, city: str, station: str, a: LockAssessment, signal: bool, observation_ts: str | None = None) -> dict:
     return {
         "event": "lock",
         "ts": ts,
         "city": city,
         "station": station,
+        "observation_ts": observation_ts,
         "bucket": a.bucket.label,
         "market_id": a.bucket.market_id,
         "state": a.state.value,
@@ -178,7 +179,12 @@ def scan(city_slug: str, mode: str, cfg: ResolverConfig | None = None) -> None:
             }
         )
         for a in assessments:
-            log.append(_lock_row(now_iso, city.city, city.station_icao, a, signal=a.signal))
+            log.append(
+                _lock_row(
+                    now_iso, city.city, city.station_icao, a,
+                    signal=a.signal, observation_ts=obs.ts.isoformat(),
+                )
+            )
     finally:
         log.close()
 
@@ -231,8 +237,23 @@ def stats(city_slug: str, root=None, min_net_edge: float = 0.02) -> None:
 
     lock_asks = [r["no_best_ask"] for r in first_lock.values() if r["no_best_ask"] is not None]
     cheap = {mid: r for mid, r in first_lock.items() if r["no_best_ask"] is not None and r["no_best_ask"] < 0.97}
-    exec5 = [r for r in first_lock.values() if (r["no_ask_size"] or 0) >= 5 and (r["net_edge"] or 0) >= min_net_edge]
-    exec20 = [r for r in first_lock.values() if (r["no_ask_size"] or 0) >= 20 and (r["net_edge"] or 0) >= min_net_edge]
+
+    def notional(r: dict) -> float | None:
+        if r["no_best_ask"] is None:
+            return None
+        return r["no_best_ask"] * (r["no_ask_size"] or 0)
+
+    exec5 = [r for r in first_lock.values() if (notional(r) or 0) >= 5 and (r["net_edge"] or 0) >= min_net_edge]
+    exec20 = [r for r in first_lock.values() if (notional(r) or 0) >= 20 and (r["net_edge"] or 0) >= min_net_edge]
+
+    # observation age at first lock: scan_ts - METAR observation_ts (only rows logged after this patch)
+    ages = []
+    for r in first_lock.values():
+        ots = r.get("observation_ts")
+        if ots:
+            ages.append(
+                (datetime.fromisoformat(r["ts"]) - datetime.fromisoformat(ots)).total_seconds()
+            )
 
     def reaction(threshold: float) -> list[float]:
         out = []
@@ -248,23 +269,32 @@ def stats(city_slug: str, root=None, min_net_edge: float = 0.02) -> None:
                     break
         return out
 
-    def pct(vals: list[float], q: float) -> float | None:
-        return statistics.quantiles(sorted(vals), n=100)[int(q) - 1] if vals else None
+    def med(vals: list[float]) -> float | None:
+        return statistics.median(vals) if vals else None
+
+    def p90(vals: list[float]) -> float | None:
+        vals = sorted(vals)
+        if len(vals) < 10:
+            return None
+        return statistics.quantiles(vals, n=100)[89]
 
     r97 = reaction(0.97)
+    r99 = reaction(0.99)
     table = Table(title=f"resolver stats — {city_slug} ({len(first_lock)} lock events)")
     table.add_column("metric")
     table.add_column("value")
     rows = [
         ("LOCK EVENTS (first lock per bucket)", str(len(first_lock))),
-        ("at lock: median NO ask", f"{pct(lock_asks, 50):.4f}" if lock_asks else "-"),
-        ("at lock: p90 NO ask", f"{pct(lock_asks, 90):.4f}" if lock_asks else "-"),
+        ("at lock: median NO ask", f"{med(lock_asks):.4f}" if lock_asks else "-"),
+        ("at lock: p90 NO ask", f"{p90(lock_asks):.4f}" if p90(lock_asks) is not None else "-"),
         ("lock ask < 0.97", str(len(cheap))),
         ("lock ask < 0.95", str(sum(1 for a in lock_asks if a < 0.95))),
         ("lock ask < 0.90", str(sum(1 for a in lock_asks if a < 0.90))),
-        ("reaction to 0.97: median s", f"{pct(r97, 50):.0f}" if r97 else "-"),
-        ("reaction to 0.97: p90 s", f"{pct(r97, 90):.0f}" if r97 else "-"),
-        ("reaction to 0.99: median s", f"{pct(reaction(0.99), 50):.0f}" if reaction(0.99) else "-"),
+        ("observation age at lock: median", f"{med(ages):.0f}s" if ages else "-"),
+        ("observation age at lock: p90", f"{p90(ages):.0f}s" if p90(ages) is not None else "-"),
+        ("reaction to 0.97: median s", f"{med(r97):.0f}" if r97 else "-"),
+        ("reaction to 0.97: p90 s", f"{p90(r97):.0f}" if p90(r97) is not None else "-"),
+        ("reaction to 0.99: median s", f"{med(r99):.0f}" if r99 else "-"),
         ("executable $5 at lock", str(len(exec5))),
         ("executable $20 at lock", str(len(exec20))),
     ]
