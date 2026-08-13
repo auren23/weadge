@@ -1,5 +1,26 @@
 # WEADGE
 
+**Automated weather mispricing trader** — PM Daily High resolution/nowcast edge.
+
+## Lane status
+
+```text
+core       stable infrastructure
+research   🧊 FROZEN (v1) — no new strategies, ever
+recorder   independent sidecar (research support)
+resolver   🔥 only active production lane — docs/resolver.md
+```
+
+Research v1 (price-bin, stale-book, lead/lag, coherence arb, cheap YES,
+multi-city forecast) is frozen as of this commit. The **only** new strategy:
+`Daily High → Resolution/Nowcast Mispricing` (`weadge.resolver`).
+Future 90 days: Weadge accepts resolver code only. `resolver` never imports
+`research`; both share `domain/` primitives.
+
+---
+
+## Legacy README (research v1, frozen)
+
 **Weather prediction-market alpha research engine.**
 
 > v0 is not a bot. v0 is an evidence engine that answers one question:
@@ -81,7 +102,10 @@ src/weadge/
   research/   scoring, calibration, incremental alpha test, latency, walk-forward
   backtest/   fee replay, delayed execution, taker engine, event-cluster bootstrap
   live/       JSONL.zst recorder (v2) + paper trading (v2)
+  resolver/   🔥 Observation-Locked Scanner — markets, observations, state, edge, execution, service
 ```
+
+Resolver V0 spec: [`docs/resolver.md`](docs/resolver.md).
 
 Notebooks are for exploration only — core logic lives in `src/weadge` and is
 tested with pytest.
